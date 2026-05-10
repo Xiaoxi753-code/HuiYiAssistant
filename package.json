@@ -1,0 +1,9 @@
+{
+  "name": "openclaw-app",
+  "private": true,
+  "scripts": {
+    "dev": "vite --host",
+    "build": "npm run build --prefix frontend",
+    "preview": "npm run preview --prefix frontend"
+  }
+}

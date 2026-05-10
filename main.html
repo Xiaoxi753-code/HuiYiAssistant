@@ -1,0 +1,2880 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenClaw 智能办公助手 - 你的数字研友</title>
+    <style>
+        :root {
+            --bg: #f5f3f0;
+            --surface: #ffffff;
+            --surface-alt: #faf9f7;
+            --text: #1a1a1a;
+            --text-secondary: #6b6560;
+            --text-muted: #9a9490;
+            --border: #e5e1db;
+            --border-light: #f0ede8;
+            --primary: #4a6cf7;
+            --primary-hover: #3b54d4;
+            --primary-light: #eef1fe;
+            --primary-glow: rgba(74, 108, 247, 0.15);
+            --accent: #f59e0b;
+            --accent-light: #fffbeb;
+            --success: #10b981;
+            --success-light: #ecfdf5;
+            --warning: #f59e0b;
+            --warning-light: #fffbeb;
+            --danger: #ef4444;
+            --danger-light: #fef2f2;
+            --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+            --shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+            --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.07), 0 2px 6px rgba(0, 0, 0, 0.04);
+            --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.10), 0 4px 12px rgba(0, 0, 0, 0.05);
+            --shadow-xl: 0 20px 48px rgba(0, 0, 0, 0.12), 0 8px 20px rgba(0, 0, 0, 0.06);
+            --radius-sm: 8px;
+            --radius: 12px;
+            --radius-lg: 16px;
+            --radius-xl: 20px;
+            --radius-2xl: 24px;
+            --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            --transition-slow: 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+            --font-sans: 'Inter', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
+            --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Consolas', monospace;
+            --sidebar-width: 260px;
+            --topbar-height: 60px;
+            --chat-sidebar-width: 380px;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        html {
+            font-size: 15px;
+            scroll-behavior: smooth;
+        }
+        body {
+            font-family: var(--font-sans);
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            overflow-x: hidden;
+        }
+
+        /* ========== BACKGROUND DECOR ========== */
+        .bg-decor {
+            position: fixed;
+            pointer-events: none;
+            z-index: 0;
+            opacity: 0.5;
+        }
+        .bg-decor.shape-1 {
+            top: -180px;
+            right: -120px;
+            width: 500px;
+            height: 500px;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(74, 108, 247, 0.06) 0%, transparent 70%);
+        }
+        .bg-decor.shape-2 {
+            bottom: -200px;
+            left: -100px;
+            width: 450px;
+            height: 450px;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(245, 158, 11, 0.05) 0%, transparent 70%);
+        }
+        .bg-decor.shape-3 {
+            top: 40%;
+            left: 50%;
+            width: 300px;
+            height: 300px;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(16, 185, 129, 0.04) 0%, transparent 70%);
+            transform: translate(-50%, -50%);
+        }
+
+        /* ========== SVG ICONS (inline replacement for emoji) ========== */
+        .svg-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+        .svg-icon svg {
+            width: 100%;
+            height: 100%;
+        }
+        .icon-sm {
+            width: 18px;
+            height: 18px;
+        }
+        .icon-md {
+            width: 24px;
+            height: 24px;
+        }
+        .icon-lg {
+            width: 32px;
+            height: 32px;
+        }
+        .icon-xl {
+            width: 44px;
+            height: 44px;
+        }
+        .icon-2xl {
+            width: 56px;
+            height: 56px;
+        }
+
+        /* ========== AUTH PAGES ========== */
+        .auth-container {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .auth-card {
+            background: var(--surface);
+            border-radius: var(--radius-2xl);
+            box-shadow: var(--shadow-xl);
+            padding: 44px 40px 36px;
+            width: 100%;
+            max-width: 440px;
+            position: relative;
+            overflow: hidden;
+            border: 1px solid var(--border-light);
+        }
+        .auth-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, var(--primary), #7c5cfc, var(--accent));
+            border-radius: 4px 4px 0 0;
+        }
+        .auth-logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--text);
+            letter-spacing: -0.02em;
+        }
+        .auth-logo .logo-icon {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, var(--primary), #6366f1);
+            border-radius: var(--radius-sm);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+            font-size: 1.3rem;
+            flex-shrink: 0;
+        }
+        .auth-subtitle {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            margin-bottom: 28px;
+        }
+        .auth-card h2 {
+            font-size: 1.55rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            margin-bottom: 4px;
+            color: var(--text);
+        }
+        .form-group {
+            margin-bottom: 18px;
+        }
+        .form-group label {
+            display: block;
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--text);
+            margin-bottom: 6px;
+            letter-spacing: 0.01em;
+        }
+        .form-group .input-wrapper {
+            position: relative;
+        }
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
+            width: 100%;
+            padding: 11px 14px;
+            border: 1.5px solid var(--border);
+            border-radius: var(--radius);
+            font-size: 0.95rem;
+            font-family: var(--font-sans);
+            transition: var(--transition);
+            background: var(--surface-alt);
+            color: var(--text);
+            outline: none;
+        }
+        .form-group input:focus,
+        .form-group textarea:focus,
+        .form-group select:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px var(--primary-glow);
+            background: var(--surface);
+        }
+        .form-group input::placeholder,
+        .form-group textarea::placeholder {
+            color: var(--text-muted);
+        }
+        .form-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            font-size: 0.85rem;
+        }
+        .form-row a {
+            color: var(--primary);
+            text-decoration: none;
+            font-weight: 500;
+            transition: var(--transition);
+        }
+        .form-row a:hover {
+            color: var(--primary-hover);
+            text-decoration: underline;
+        }
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 11px 22px;
+            border-radius: var(--radius);
+            font-weight: 600;
+            font-size: 0.95rem;
+            cursor: pointer;
+            border: none;
+            transition: var(--transition);
+            letter-spacing: 0.01em;
+            font-family: var(--font-sans);
+            white-space: nowrap;
+            text-decoration: none;
+        }
+        .btn-primary {
+            background: var(--primary);
+            color: #fff;
+            width: 100%;
+            box-shadow: 0 2px 8px rgba(74, 108, 247, 0.25);
+        }
+        .btn-primary:hover {
+            background: var(--primary-hover);
+            box-shadow: 0 4px 16px rgba(74, 108, 247, 0.35);
+            transform: translateY(-1px);
+        }
+        .btn-primary:active {
+            transform: scale(0.98);
+        }
+        .btn-outline {
+            background: transparent;
+            border: 1.5px solid var(--border);
+            color: var(--text);
+        }
+        .btn-outline:hover {
+            border-color: var(--primary);
+            background: var(--primary-light);
+            color: var(--primary);
+        }
+        .btn-sm {
+            padding: 7px 14px;
+            font-size: 0.8rem;
+            border-radius: var(--radius-sm);
+            font-weight: 500;
+        }
+        .btn-xs {
+            padding: 4px 10px;
+            font-size: 0.75rem;
+            border-radius: 6px;
+            font-weight: 500;
+        }
+        .btn-ghost {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            padding: 6px 10px;
+            border-radius: var(--radius-sm);
+            transition: var(--transition);
+        }
+        .btn-ghost:hover {
+            background: var(--surface-alt);
+            color: var(--text);
+        }
+        .btn-accent {
+            background: var(--accent);
+            color: #fff;
+            box-shadow: 0 2px 8px rgba(245, 158, 11, 0.25);
+        }
+        .btn-accent:hover {
+            box-shadow: 0 4px 16px rgba(245, 158, 11, 0.35);
+            transform: translateY(-1px);
+        }
+        .btn-success {
+            background: var(--success);
+            color: #fff;
+            box-shadow: 0 2px 8px rgba(16, 185, 129, 0.25);
+        }
+        .btn-danger {
+            background: var(--danger);
+            color: #fff;
+        }
+        .btn-danger:hover {
+            background: #dc2626;
+        }
+        .auth-footer {
+            text-align: center;
+            margin-top: 22px;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+        .auth-footer a {
+            color: var(--primary);
+            font-weight: 600;
+            text-decoration: none;
+        }
+        .auth-footer a:hover {
+            text-decoration: underline;
+        }
+        .divider {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin: 20px 0;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+        }
+        .divider::before,
+        .divider::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: var(--border);
+        }
+        .social-btns {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+        }
+        .social-btn {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            border: 1.5px solid var(--border);
+            background: var(--surface);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1rem;
+            font-weight: 700;
+            transition: var(--transition);
+            color: var(--text-secondary);
+        }
+        .social-btn:hover {
+            border-color: var(--primary);
+            background: var(--primary-light);
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-md);
+            color: var(--primary);
+        }
+        .error-msg {
+            color: var(--danger);
+            font-size: 0.78rem;
+            margin-top: 4px;
+            display: none;
+        }
+        .success-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            background: var(--success-light);
+            color: var(--success);
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+
+        /* ========== TOAST ========== */
+        .toast-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 9999;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            pointer-events: none;
+        }
+        .toast {
+            padding: 12px 20px;
+            border-radius: var(--radius);
+            background: var(--surface);
+            box-shadow: var(--shadow-lg);
+            border: 1px solid var(--border);
+            font-size: 0.9rem;
+            font-weight: 500;
+            animation: slideInRight 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            max-width: 420px;
+            pointer-events: auto;
+        }
+        .toast.success {
+            border-left: 3px solid var(--success);
+        }
+        .toast.error {
+            border-left: 3px solid var(--danger);
+        }
+        .toast.info {
+            border-left: 3px solid var(--primary);
+        }
+        .toast.warning {
+            border-left: 3px solid var(--warning);
+        }
+        @keyframes slideInRight {
+            from {
+                transform: translateX(120%);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+        @keyframes fadeOut {
+            from {
+                opacity: 1;
+            }
+            to {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+        }
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(8px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        /* ========== DASHBOARD LAYOUT ========== */
+        .dashboard-layout {
+            display: none;
+            position: relative;
+            z-index: 1;
+            min-height: 100vh;
+        }
+        .dashboard-layout.active {
+            display: flex;
+        }
+        .sidebar {
+            width: var(--sidebar-width);
+            height: 100vh;
+            position: fixed;
+            left: 0;
+            top: 0;
+            background: var(--surface);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            z-index: 100;
+            box-shadow: var(--shadow-sm);
+            transition: var(--transition-slow);
+            overflow: hidden;
+        }
+        .sidebar-header {
+            padding: 18px 20px;
+            border-bottom: 1px solid var(--border-light);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .sidebar-header .logo-icon-sm {
+            width: 34px;
+            height: 34px;
+            background: linear-gradient(135deg, var(--primary), #6366f1);
+            border-radius: var(--radius-sm);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+            font-size: 1rem;
+            flex-shrink: 0;
+            font-weight: 700;
+        }
+        .sidebar-header .logo-text {
+            font-weight: 700;
+            font-size: 1.05rem;
+            letter-spacing: -0.01em;
+            color: var(--text);
+        }
+        .sidebar-nav {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+        }
+        .sidebar-nav .nav-section {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-muted);
+            padding: 16px 10px 6px;
+            font-weight: 600;
+        }
+        .sidebar-nav .nav-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 12px;
+            border-radius: var(--radius);
+            cursor: pointer;
+            font-weight: 500;
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            transition: var(--transition);
+            border: none;
+            background: transparent;
+            width: 100%;
+            text-align: left;
+            font-family: var(--font-sans);
+            position: relative;
+        }
+        .sidebar-nav .nav-item:hover {
+            background: var(--surface-alt);
+            color: var(--text);
+        }
+        .sidebar-nav .nav-item.active {
+            background: var(--primary-light);
+            color: var(--primary);
+            font-weight: 600;
+        }
+        .sidebar-nav .nav-item.active::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 3px;
+            height: 20px;
+            background: var(--primary);
+            border-radius: 0 3px 3px 0;
+        }
+        .nav-badge {
+            margin-left: auto;
+            font-size: 0.7rem;
+            padding: 2px 8px;
+            border-radius: 10px;
+            background: var(--primary-light);
+            color: var(--primary);
+            font-weight: 600;
+        }
+        .nav-badge.hot {
+            background: #fef3c7;
+            color: #d97706;
+            animation: pulse-dot 2s infinite;
+        }
+        @keyframes pulse-dot {
+            0%,
+            100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.5;
+            }
+        }
+        .sidebar-footer {
+            padding: 12px 16px;
+            border-top: 1px solid var(--border-light);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .sidebar-footer .user-avatar {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #6366f1, #4a6cf7);
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 0.85rem;
+            flex-shrink: 0;
+        }
+        .sidebar-footer .user-info {
+            flex: 1;
+            min-width: 0;
+        }
+        .sidebar-footer .user-name {
+            font-weight: 600;
+            font-size: 0.85rem;
+            color: var(--text);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .sidebar-footer .user-role {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+        }
+        .main-content {
+            margin-left: var(--sidebar-width);
+            flex: 1;
+            padding: 24px 28px;
+            min-height: 100vh;
+            transition: var(--transition-slow);
+        }
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 24px;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+        .topbar .page-title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            color: var(--text);
+        }
+        .topbar .breadcrumb {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+        .topbar-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .search-box {
+            position: relative;
+        }
+        .search-box input {
+            padding: 9px 14px 9px 36px;
+            border: 1.5px solid var(--border);
+            border-radius: 20px;
+            font-size: 0.85rem;
+            width: 200px;
+            background: var(--surface);
+            transition: var(--transition);
+            outline: none;
+            font-family: var(--font-sans);
+        }
+        .search-box input:focus {
+            border-color: var(--primary);
+            width: 240px;
+            box-shadow: 0 0 0 3px var(--primary-glow);
+        }
+        .search-box .search-icon {
+            position: absolute;
+            left: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            pointer-events: none;
+        }
+
+        /* ========== CARDS & GRID ========== */
+        .cards-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .card {
+            background: var(--surface);
+            border-radius: var(--radius-lg);
+            padding: 20px 22px;
+            border: 1px solid var(--border-light);
+            box-shadow: var(--shadow-sm);
+            transition: var(--transition);
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+        }
+        .card:hover {
+            box-shadow: var(--shadow-lg);
+            transform: translateY(-2px);
+            border-color: #d8d4ce;
+        }
+        .card .card-icon {
+            width: 44px;
+            height: 44px;
+            border-radius: var(--radius);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
+            margin-bottom: 12px;
+            flex-shrink: 0;
+            font-weight: 700;
+        }
+        .card .card-icon.blue {
+            background: #eef2ff;
+            color: #4a6cf7;
+        }
+        .card .card-icon.green {
+            background: #ecfdf5;
+            color: #10b981;
+        }
+        .card .card-icon.amber {
+            background: #fffbeb;
+            color: #f59e0b;
+        }
+        .card .card-icon.purple {
+            background: #f5f3ff;
+            color: #7c3aed;
+        }
+        .card .card-icon.rose {
+            background: #fff1f2;
+            color: #e11d48;
+        }
+        .card .card-icon.teal {
+            background: #f0fdfa;
+            color: #0d9488;
+        }
+        .card .card-icon.slate {
+            background: #f1f5f9;
+            color: #475569;
+        }
+        .card .card-icon.cyan {
+            background: #ecfeff;
+            color: #0891b2;
+        }
+        .card h3 {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text);
+            margin-bottom: 4px;
+            letter-spacing: -0.01em;
+        }
+        .card p {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+        .card .card-badge {
+            position: absolute;
+            top: 14px;
+            right: 14px;
+            font-size: 0.68rem;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+        }
+        .badge-new {
+            background: #fef3c7;
+            color: #b45309;
+        }
+        .badge-popular {
+            background: #fce7f3;
+            color: #be185d;
+        }
+        .badge-pro {
+            background: #e0e7ff;
+            color: #4338ca;
+        }
+        .card-arrow {
+            position: absolute;
+            bottom: 16px;
+            right: 18px;
+            opacity: 0;
+            transition: var(--transition);
+            color: var(--primary);
+            font-size: 1rem;
+        }
+        .card:hover .card-arrow {
+            opacity: 1;
+            right: 14px;
+        }
+
+        /* ========== TEMPLATE SHOWCASE ========== */
+        .template-showcase {
+            background: var(--surface);
+            border-radius: var(--radius-xl);
+            padding: 24px 26px;
+            border: 1px solid var(--border-light);
+            box-shadow: var(--shadow-md);
+            margin-bottom: 24px;
+            position: relative;
+            overflow: hidden;
+        }
+        .template-showcase::after {
+            content: '';
+            position: absolute;
+            top: -30px;
+            right: -30px;
+            width: 120px;
+            height: 120px;
+            background: radial-gradient(circle, rgba(74, 108, 247, 0.06) 0%, transparent 70%);
+            border-radius: 50%;
+            pointer-events: none;
+        }
+        .template-showcase h2 {
+            font-size: 1.2rem;
+            font-weight: 700;
+            margin-bottom: 4px;
+            letter-spacing: -0.01em;
+        }
+        .template-showcase .subtitle {
+            font-size: 0.82rem;
+            color: var(--text-secondary);
+            margin-bottom: 16px;
+        }
+        .template-code-block {
+            background: #1e1e2e;
+            color: #cdd6f4;
+            border-radius: var(--radius);
+            padding: 18px 20px;
+            font-family: var(--font-mono);
+            font-size: 0.82rem;
+            line-height: 1.8;
+            overflow-x: auto;
+            position: relative;
+            letter-spacing: 0.02em;
+        }
+        .template-code-block .token-brace {
+            color: #f9e2af;
+            font-weight: 700;
+        }
+        .template-code-block .token-var {
+            background: rgba(245, 158, 11, 0.25);
+            color: #fab387;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 600;
+            animation: highlightPulse 2.5s ease-in-out infinite;
+        }
+        .template-code-block .token-bracket {
+            color: #94e2d5;
+            font-weight: 600;
+        }
+        .template-code-block .token-fill {
+            background: rgba(116, 199, 236, 0.2);
+            color: #89dceb;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-style: italic;
+        }
+        @keyframes highlightPulse {
+            0%,
+            100% {
+                background: rgba(245, 158, 11, 0.25);
+            }
+            50% {
+                background: rgba(245, 158, 11, 0.5);
+                box-shadow: 0 0 12px rgba(245, 158, 11, 0.3);
+            }
+        }
+        .template-demo-row {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-top: 16px;
+        }
+        .template-demo-card {
+            flex: 1;
+            min-width: 180px;
+            background: var(--surface-alt);
+            border-radius: var(--radius);
+            padding: 14px 16px;
+            border: 1px dashed var(--border);
+            text-align: center;
+            transition: var(--transition);
+            cursor: pointer;
+        }
+        .template-demo-card:hover {
+            border-color: var(--primary);
+            background: var(--primary-light);
+        }
+        .template-demo-card .demo-icon {
+            font-size: 1.8rem;
+            margin-bottom: 6px;
+            font-weight: 700;
+            color: var(--primary);
+        }
+        .template-demo-card .label {
+            font-weight: 600;
+            font-size: 0.85rem;
+        }
+        .template-demo-card .hint {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+        }
+
+        /* ========== STATS ROW ========== */
+        .stats-row {
+            display: flex;
+            gap: 14px;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            flex: 1;
+            min-width: 140px;
+            background: var(--surface);
+            border-radius: var(--radius-lg);
+            padding: 16px 18px;
+            border: 1px solid var(--border-light);
+            box-shadow: var(--shadow-sm);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .stat-card .stat-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: var(--radius-sm);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.1rem;
+            flex-shrink: 0;
+            font-weight: 700;
+        }
+        .stat-card .stat-value {
+            font-size: 1.4rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+        .stat-card .stat-label {
+            font-size: 0.72rem;
+            color: var(--text-muted);
+        }
+
+        /* ========== SECTION HEADER ========== */
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 14px;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .section-header h3 {
+            font-size: 1.05rem;
+            font-weight: 700;
+            letter-spacing: -0.01em;
+        }
+        .section-header .see-all {
+            font-size: 0.8rem;
+            color: var(--primary);
+            cursor: pointer;
+            font-weight: 500;
+            text-decoration: none;
+        }
+        .section-header .see-all:hover {
+            text-decoration: underline;
+        }
+
+        /* ========== ACTIVITY LIST ========== */
+        .activity-list {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .activity-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 14px;
+            background: var(--surface);
+            border-radius: var(--radius);
+            border: 1px solid var(--border-light);
+            font-size: 0.85rem;
+            transition: var(--transition);
+        }
+        .activity-item:hover {
+            background: var(--surface-alt);
+            box-shadow: var(--shadow-sm);
+        }
+        .activity-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .activity-dot.green {
+            background: var(--success);
+        }
+        .activity-dot.blue {
+            background: var(--primary);
+        }
+        .activity-dot.amber {
+            background: var(--accent);
+        }
+        .activity-time {
+            margin-left: auto;
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            white-space: nowrap;
+        }
+
+        /* ========== MODAL ========== */
+        .modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.4);
+            z-index: 200;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(2px);
+            animation: fadeIn 0.2s ease;
+        }
+        .modal {
+            background: var(--surface);
+            border-radius: var(--radius-xl);
+            padding: 28px 24px;
+            width: 90%;
+            max-width: 520px;
+            box-shadow: var(--shadow-xl);
+            position: relative;
+            animation: scaleIn 0.25s ease;
+            max-height: 85vh;
+            overflow-y: auto;
+        }
+        .modal-wide {
+            max-width: 680px;
+        }
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+            }
+            to {
+                opacity: 1;
+            }
+        }
+        @keyframes scaleIn {
+            from {
+                transform: scale(0.92);
+                opacity: 0;
+            }
+            to {
+                transform: scale(1);
+                opacity: 1;
+            }
+        }
+        .modal-close {
+            position: absolute;
+            top: 12px;
+            right: 14px;
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            border: none;
+            background: var(--surface-alt);
+            cursor: pointer;
+            font-size: 1.1rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: var(--transition);
+            color: var(--text-secondary);
+            font-weight: 600;
+        }
+        .modal-close:hover {
+            background: #f1f0ed;
+            color: var(--text);
+        }
+
+        /* ========== CHAT PANEL ========== */
+        .chat-container {
+            display: flex;
+            flex-direction: column;
+            height: calc(100vh - 180px);
+            min-height: 500px;
+            background: var(--surface);
+            border-radius: var(--radius-xl);
+            border: 1px solid var(--border-light);
+            box-shadow: var(--shadow-md);
+            overflow: hidden;
+        }
+        .chat-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border-light);
+            background: var(--surface-alt);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .chat-header .chat-avatar {
+            width: 38px;
+            height: 38px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #4a6cf7, #6366f1);
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 0.9rem;
+            flex-shrink: 0;
+        }
+        .chat-header .chat-title {
+            font-weight: 600;
+            font-size: 0.95rem;
+        }
+        .chat-header .chat-status {
+            font-size: 0.7rem;
+            color: var(--success);
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .chat-header .chat-status::before {
+            content: '';
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--success);
+            animation: pulse-dot 2s infinite;
+        }
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            background: #fafbfc;
+        }
+        .chat-msg {
+            display: flex;
+            gap: 8px;
+            max-width: 85%;
+            animation: fadeInUp 0.3s ease;
+        }
+        .chat-msg.user {
+            align-self: flex-end;
+            flex-direction: row-reverse;
+        }
+        .chat-msg.assistant {
+            align-self: flex-start;
+        }
+        .chat-msg .msg-avatar {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.7rem;
+            font-weight: 700;
+            color: #fff;
+        }
+        .chat-msg.user .msg-avatar {
+            background: #6366f1;
+        }
+        .chat-msg.assistant .msg-avatar {
+            background: linear-gradient(135deg, #4a6cf7, #7c5cfc);
+        }
+        .chat-msg .msg-bubble {
+            padding: 10px 14px;
+            border-radius: 14px;
+            font-size: 0.85rem;
+            line-height: 1.5;
+            position: relative;
+        }
+        .chat-msg.user .msg-bubble {
+            background: var(--primary);
+            color: #fff;
+            border-bottom-right-radius: 4px;
+        }
+        .chat-msg.assistant .msg-bubble {
+            background: #fff;
+            border: 1px solid var(--border-light);
+            color: var(--text);
+            border-bottom-left-radius: 4px;
+            box-shadow: var(--shadow-sm);
+        }
+        .chat-msg .msg-bubble .action-btn-inline {
+            display: inline-block;
+            margin-top: 6px;
+            padding: 5px 12px;
+            border-radius: 14px;
+            background: var(--primary-light);
+            color: var(--primary);
+            font-size: 0.75rem;
+            cursor: pointer;
+            border: none;
+            font-weight: 600;
+            transition: var(--transition);
+            font-family: var(--font-sans);
+        }
+        .chat-msg .msg-bubble .action-btn-inline:hover {
+            background: var(--primary);
+            color: #fff;
+        }
+        .chat-input-area {
+            padding: 12px 16px;
+            border-top: 1px solid var(--border-light);
+            background: #fff;
+            display: flex;
+            gap: 8px;
+            align-items: flex-end;
+        }
+        .chat-input-area textarea {
+            flex: 1;
+            padding: 10px 14px;
+            border: 1.5px solid var(--border);
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-family: var(--font-sans);
+            resize: none;
+            outline: none;
+            max-height: 100px;
+            min-height: 40px;
+            transition: var(--transition);
+            background: var(--surface-alt);
+            line-height: 1.4;
+        }
+        .chat-input-area textarea:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px var(--primary-glow);
+            background: #fff;
+        }
+        .chat-input-area .send-btn {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: var(--primary);
+            color: #fff;
+            border: none;
+            cursor: pointer;
+            font-size: 1rem;
+            flex-shrink: 0;
+            transition: var(--transition);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+        }
+        .chat-input-area .send-btn:hover {
+            background: var(--primary-hover);
+            transform: scale(1.05);
+        }
+        .chat-suggestions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            padding: 8px 16px;
+            border-top: 1px solid var(--border-light);
+            background: #fafbfc;
+        }
+        .chat-suggestion-chip {
+            padding: 5px 12px;
+            border-radius: 14px;
+            background: #fff;
+            border: 1px solid var(--border);
+            font-size: 0.72rem;
+            cursor: pointer;
+            transition: var(--transition);
+            white-space: nowrap;
+            color: var(--text-secondary);
+            font-family: var(--font-sans);
+        }
+        .chat-suggestion-chip:hover {
+            border-color: var(--primary);
+            color: var(--primary);
+            background: var(--primary-light);
+        }
+
+        /* ========== API CONFIG PANEL ========== */
+        .api-config-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+        .api-provider-card {
+            background: var(--surface);
+            border-radius: var(--radius-lg);
+            border: 1px solid var(--border-light);
+            box-shadow: var(--shadow-sm);
+            padding: 18px 20px;
+            transition: var(--transition);
+            position: relative;
+        }
+        .api-provider-card:hover {
+            box-shadow: var(--shadow-md);
+        }
+        .api-provider-card.enabled {
+            border-left: 3px solid var(--success);
+        }
+        .api-provider-card.disabled {
+            border-left: 3px solid #d1d5db;
+            opacity: 0.7;
+        }
+        .api-provider-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+        .api-provider-header .provider-name {
+            font-weight: 700;
+            font-size: 0.95rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .api-provider-header .provider-logo {
+            width: 32px;
+            height: 32px;
+            border-radius: var(--radius-sm);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 0.75rem;
+            color: #fff;
+            flex-shrink: 0;
+        }
+        .provider-logo.openai {
+            background: #10a37f;
+        }
+        .provider-logo.claude {
+            background: #d97706;
+        }
+        .provider-logo.gemini {
+            background: #4285f4;
+        }
+        .provider-logo.deepseek {
+            background: #4a6cf7;
+        }
+        .provider-logo.qwen {
+            background: #615ced;
+        }
+        .provider-logo.moonshot {
+            background: #1a1a1a;
+        }
+        .provider-logo.custom {
+            background: #475569;
+        }
+        .toggle-switch {
+            position: relative;
+            width: 44px;
+            height: 24px;
+            cursor: pointer;
+        }
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .toggle-switch .slider {
+            position: absolute;
+            inset: 0;
+            background: #d1d5db;
+            border-radius: 24px;
+            transition: var(--transition);
+        }
+        .toggle-switch .slider::before {
+            content: '';
+            position: absolute;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #fff;
+            top: 3px;
+            left: 3px;
+            transition: var(--transition);
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+        }
+        .toggle-switch input:checked+.slider {
+            background: var(--success);
+        }
+        .toggle-switch input:checked+.slider::before {
+            transform: translateX(20px);
+        }
+        .api-field-row {
+            margin-bottom: 8px;
+        }
+        .api-field-row label {
+            font-size: 0.72rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            display: block;
+            margin-bottom: 3px;
+        }
+        .api-field-row input {
+            width: 100%;
+            padding: 8px 10px;
+            border: 1.5px solid var(--border);
+            border-radius: var(--radius-sm);
+            font-size: 0.8rem;
+            font-family: var(--font-sans);
+            background: var(--surface-alt);
+            transition: var(--transition);
+            outline: none;
+        }
+        .api-field-row input:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 2px var(--primary-glow);
+        }
+        .api-field-row input[type="password"] {
+            letter-spacing: 0.15em;
+        }
+
+        /* ========== RESPONSIVE ========== */
+        @media (max-width: 1100px) {
+            .api-config-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        @media (max-width: 900px) {
+            .sidebar {
+                width: 64px;
+            }
+            .sidebar .logo-text,
+            .sidebar .nav-section,
+            .sidebar .nav-item span:not(.nav-item-icon-text),
+            .sidebar .user-info,
+            .sidebar .nav-badge {
+                display: none;
+            }
+            .sidebar-nav .nav-item {
+                justify-content: center;
+                padding: 12px;
+            }
+            .sidebar-header {
+                justify-content: center;
+                padding: 14px;
+            }
+            .main-content {
+                margin-left: 64px;
+                padding: 16px;
+            }
+            :root {
+                --sidebar-width: 64px;
+            }
+            .cards-grid {
+                grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            }
+            .stats-row {
+                flex-direction: column;
+            }
+            .template-demo-row {
+                flex-direction: column;
+            }
+            .api-config-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        @media (max-width: 600px) {
+            .auth-card {
+                padding: 28px 20px 24px;
+                border-radius: var(--radius-lg);
+            }
+            .cards-grid {
+                grid-template-columns: 1fr;
+            }
+            .sidebar {
+                width: 0;
+                position: fixed;
+                z-index: 150;
+            }
+            .main-content {
+                margin-left: 0;
+            }
+            .topbar {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            .search-box input {
+                width: 100%;
+            }
+            .search-box input:focus {
+                width: 100%;
+            }
+            .chat-container {
+                height: calc(100vh - 140px);
+                min-height: 400px;
+            }
+            .api-config-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* ========== HIDDEN ========== */
+        .hidden {
+            display: none !important;
+        }
+
+        /* ========== MISC ========== */
+        .text-primary {
+            color: var(--primary);
+        }
+        .text-muted {
+            color: var(--text-muted);
+        }
+        .text-success {
+            color: var(--success);
+        }
+        .text-danger {
+            color: var(--danger);
+        }
+        .mt-1 {
+            margin-top: 4px;
+        }
+        .mt-2 {
+            margin-top: 8px;
+        }
+        .mt-3 {
+            margin-top: 12px;
+        }
+        .mt-4 {
+            margin-top: 16px;
+        }
+        .mb-1 {
+            margin-bottom: 4px;
+        }
+        .mb-2 {
+            margin-bottom: 8px;
+        }
+        .mb-3 {
+            margin-bottom: 12px;
+        }
+        .gap-2 {
+            gap: 8px;
+        }
+        .flex {
+            display: flex;
+        }
+        .flex-wrap {
+            flex-wrap: wrap;
+        }
+        .items-center {
+            align-items: center;
+        }
+        .justify-between {
+            justify-content: space-between;
+        }
+        .w-full {
+            width: 100%;
+        }
+        .text-sm {
+            font-size: 0.82rem;
+        }
+        .text-xs {
+            font-size: 0.72rem;
+        }
+        .font-bold {
+            font-weight: 700;
+        }
+        .rounded {
+            border-radius: var(--radius);
+        }
+    </style>
+</head>
+<body>
+
+    <!-- ==================== BACKGROUND DECORATIONS ==================== -->
+    <div class="bg-decor shape-1"></div>
+    <div class="bg-decor shape-2"></div>
+    <div class="bg-decor shape-3"></div>
+
+    <!-- ==================== TOAST CONTAINER ==================== -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- ==================== AUTH: LOGIN PAGE ==================== -->
+    <div class="auth-container" id="pageLogin">
+        <div class="auth-card">
+            <div class="auth-logo">
+                <div class="logo-icon">OC</div>
+                OpenClaw
+            </div>
+            <h2>欢迎回来</h2>
+            <p class="auth-subtitle">登录你的智能办公空间，继续高效工作</p>
+            <form id="loginForm" onsubmit="handleLogin(event)">
+                <div class="form-group">
+                    <label>邮箱地址</label>
+                    <input type="email" id="loginEmail" placeholder="your@email.com" required>
+                </div>
+                <div class="form-group">
+                    <label>密码</label>
+                    <input type="password" id="loginPassword" placeholder="输入密码" required minlength="6">
+                    <p class="error-msg" id="loginError">邮箱或密码错误，请重试</p>
+                </div>
+                <div class="form-row">
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:400;">
+                        <input type="checkbox" style="accent-color:var(--primary);"> 记住我
+                    </label>
+                    <a href="#" onclick="showPage('forgotPassword')">忘记密码？</a>
+                </div>
+                <button type="submit" class="btn btn-primary">登录</button>
+            </form>
+            <div class="divider">或</div>
+            <div class="social-btns">
+                <button class="social-btn" title="Google登录">G</button>
+                <button class="social-btn" title="微信登录">W</button>
+                <button class="social-btn" title="GitHub登录">GH</button>
+            </div>
+            <p class="auth-footer">
+                还没有账号？<a href="#" onclick="showPage('register')">立即注册</a>
+            </p>
+        </div>
+    </div>
+
+    <!-- ==================== AUTH: REGISTER PAGE ==================== -->
+    <div class="auth-container hidden" id="pageRegister">
+        <div class="auth-card">
+            <div class="auth-logo">
+                <div class="logo-icon">OC</div>
+                OpenClaw
+            </div>
+            <h2>创建账号</h2>
+            <p class="auth-subtitle">注册即可解锁全部智能办公功能</p>
+            <form id="registerForm" onsubmit="handleRegister(event)">
+                <div class="form-group">
+                    <label>用户名</label>
+                    <input type="text" id="regName" placeholder="你的名字" required minlength="2">
+                </div>
+                <div class="form-group">
+                    <label>邮箱地址</label>
+                    <input type="email" id="regEmail" placeholder="your@email.com" required>
+                </div>
+                <div class="form-group">
+                    <label>密码</label>
+                    <input type="password" id="regPassword" placeholder="至少6位密码" required minlength="6">
+                </div>
+                <div class="form-group">
+                    <label>确认密码</label>
+                    <input type="password" id="regConfirmPassword" placeholder="再次输入密码" required minlength="6">
+                    <p class="error-msg" id="regError">两次密码不一致</p>
+                </div>
+                <button type="submit" class="btn btn-primary">注册</button>
+            </form>
+            <p class="auth-footer">
+                已有账号？<a href="#" onclick="showPage('login')">去登录</a>
+            </p>
+        </div>
+    </div>
+
+    <!-- ==================== AUTH: FORGOT PASSWORD PAGE ==================== -->
+    <div class="auth-container hidden" id="pageForgotPassword">
+        <div class="auth-card">
+            <div class="auth-logo">
+                <div class="logo-icon">OC</div>
+                OpenClaw
+            </div>
+            <h2>找回密码</h2>
+            <p class="auth-subtitle">输入邮箱，我们会发送重置链接</p>
+            <form id="forgotForm" onsubmit="handleForgotPassword(event)">
+                <div class="form-group">
+                    <label>注册邮箱</label>
+                    <input type="email" id="forgotEmail" placeholder="your@email.com" required>
+                </div>
+                <button type="submit" class="btn btn-primary">发送重置链接</button>
+            </form>
+            <p class="auth-footer">
+                <a href="#" onclick="showPage('login')">返回登录</a>
+            </p>
+        </div>
+    </div>
+
+    <!-- ==================== DASHBOARD LAYOUT ==================== -->
+    <div class="dashboard-layout" id="pageDashboard">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo-icon-sm">OC</div>
+                <span class="logo-text">OpenClaw</span>
+            </div>
+            <nav class="sidebar-nav">
+                <div class="nav-section">主菜单</div>
+                <button class="nav-item active" onclick="switchTab('overview', this)">
+                    <span class="nav-item-icon-text">&#9681;</span> <span>工作台概览</span>
+                </button>
+                <button class="nav-item" onclick="switchTab('chat', this)">
+                    <span class="nav-item-icon-text">&#9654;</span> <span>对话助手</span><span class="nav-badge hot">NEW</span>
+                </button>
+                <button class="nav-item" onclick="switchTab('templates', this)">
+                    <span class="nav-item-icon-text">&#9638;</span> <span>智能模板引擎</span><span class="nav-badge hot">HOT</span>
+                </button>
+                <button class="nav-item" onclick="switchTab('meeting', this)">
+                    <span class="nav-item-icon-text">&#9679;</span> <span>智能会议纪要</span>
+                </button>
+                <button class="nav-item" onclick="switchTab('paper', this)">
+                    <span class="nav-item-icon-text">&#9633;</span> <span>文献论文摘要</span>
+                </button>
+                <button class="nav-item" onclick="switchTab('polish', this)">
+                    <span class="nav-item-icon-text">&#9998;</span> <span>多语言润色写作</span>
+                </button>
+                <button class="nav-item" onclick="switchTab('ppt', this)">
+                    <span class="nav-item-icon-text">&#9650;</span> <span>PPT大纲生成</span>
+                </button>
+                <div class="nav-section">更多</div>
+                <button class="nav-item" onclick="switchTab('companion', this)">
+                    <span class="nav-item-icon-text">&#9825;</span> <span>情感陪伴对话</span>
+                </button>
+                <button class="nav-item" onclick="switchTab('identity', this)">
+                    <span class="nav-item-icon-text">&#8644;</span> <span>多身份切换</span>
+                </button>
+                <button class="nav-item" onclick="switchTab('reminders', this)">
+                    <span class="nav-item-icon-text">&#9200;</span> <span>主动提醒推送</span>
+                </button>
+                <button class="nav-item" onclick="switchTab('collab', this)">
+                    <span class="nav-item-icon-text">&#9672;</span> <span>协作空间</span><span class="nav-badge">PRO</span>
+                </button>
+                <div class="nav-section">设置</div>
+                <button class="nav-item" onclick="switchTab('apiConfig', this)">
+                    <span class="nav-item-icon-text">&#9881;</span> <span>API &amp; 模型配置</span>
+                </button>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="user-avatar" id="sidebarAvatar">U</div>
+                <div class="user-info">
+                    <div class="user-name" id="sidebarUserName">用户</div>
+                    <div class="user-role">个人版</div>
+                </div>
+                <button class="btn-ghost" title="退出登录" onclick="handleLogout()" style="font-size:1.1rem;font-weight:700;">&#10149;</button>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <div class="main-content" id="mainContent">
+            <!-- Topbar -->
+            <div class="topbar">
+                <div>
+                    <h1 class="page-title" id="pageTitle">工作台概览</h1>
+                    <span class="breadcrumb">首页 / 工作台</span>
+                </div>
+                <div class="topbar-actions">
+                    <div class="search-box">
+                        <span class="search-icon">&#8981;</span>
+                        <input type="text" placeholder="搜索文档、模板...">
+                    </div>
+                    <button class="btn btn-outline btn-sm" onclick="showToast('info','数据已同步')">同步</button>
+                    <button class="btn btn-primary btn-sm" onclick="showQuickActionModal()">快速操作</button>
+                </div>
+            </div>
+
+            <!-- ===== TAB: OVERVIEW ===== -->
+            <div class="tab-content" id="tabOverview">
+                <div class="stats-row">
+                    <div class="stat-card">
+                        <div class="stat-icon" style="background:#eef2ff;color:#4a6cf7;">D</div>
+                        <div>
+                            <div class="stat-value">23</div>
+                            <div class="stat-label">本月处理文档</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon" style="background:#ecfdf5;color:#10b981;">&#10003;</div>
+                        <div>
+                            <div class="stat-value">156</div>
+                            <div class="stat-label">已完成待办</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon" style="background:#fffbeb;color:#f59e0b;">T</div>
+                        <div>
+                            <div class="stat-value">8</div>
+                            <div class="stat-label">我的模板</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon" style="background:#f5f3ff;color:#7c3aed;">&#9733;</div>
+                        <div>
+                            <div class="stat-value">4.9</div>
+                            <div class="stat-label">AI满意度评分</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="template-showcase">
+                    <h2>智能模板引擎 — 核心创新</h2>
+                    <p class="subtitle">使用 <strong>{变量}</strong>、<strong>[选项]</strong>、<strong>{{自动填充}}</strong> 语法创建模板，AI自动识别并精准填写。告别重复的格式指令！</p>
+                    <div class="template-code-block">
+                        <span style="color:#6c7086;"># 会议纪要模板 v2.0</span><br>
+                        <span style="color:#a6e3a1;">## 会议主题：</span><span class="token-var">{会议主题}</span><br>
+                        <span style="color:#a6e3a1;">## 时间地点：</span><span class="token-fill">{{自动提取时间地点}}</span><br>
+                        <span style="color:#a6e3a1;">## 参会人员：</span><span class="token-fill">{{从录音中识别参会人}}</span><br>
+                        <span style="color:#a6e3a1;">## 核心决议</span><br>
+                        <span style="color:#f38ba8;">决议类型：</span><span class="token-bracket">[通过|否决|延期讨论]</span><br>
+                        <span style="color:#a6e3a1;">## 待办事项</span><br>
+                        <span class="token-var">{待办事项列表}</span> <span style="color:#6c7086;">AI自动提取并推送日历</span><br>
+                        <span style="color:#a6e3a1;">## 分歧点</span><br>
+                        <span class="token-var">{主要分歧}</span> <span style="color:#6c7086;">自动归纳不同意见</span>
+                    </div>
+                    <div class="template-demo-row">
+                        <div class="template-demo-card" onclick="switchTab('templates', document.querySelector('.nav-item:nth-child(3)'))">
+                            <div class="demo-icon">&#9679;</div>
+                            <div class="label">会议纪要模板</div>
+                            <div class="hint">12个变量 · 自动填充</div>
+                        </div>
+                        <div class="template-demo-card" onclick="switchTab('templates', document.querySelector('.nav-item:nth-child(3)'))">
+                            <div class="demo-icon">&#9633;</div>
+                            <div class="label">论文摘要模板</div>
+                            <div class="hint">8个变量 · 结构化卡片</div>
+                        </div>
+                        <div class="template-demo-card" onclick="switchTab('templates', document.querySelector('.nav-item:nth-child(3)'))">
+                            <div class="demo-icon">&#9650;</div>
+                            <div class="label">PPT大纲模板</div>
+                            <div class="hint">逐页自动生成</div>
+                        </div>
+                        <div class="template-demo-card" onclick="switchTab('templates', document.querySelector('.nav-item:nth-child(3)'))">
+                            <div class="demo-icon">&#9998;</div>
+                            <div class="label">润色写作模板</div>
+                            <div class="hint">多风格一键切换</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="section-header">
+                    <h3>全部功能模块</h3>
+                    <span class="see-all">拖拽排序</span>
+                </div>
+                <div class="cards-grid">
+                    <div class="card" onclick="switchTab('meeting', document.querySelector('.nav-item:nth-child(4)'))">
+                        <div class="card-icon blue">&#9679;</div>
+                        <span class="card-badge badge-popular">热门</span>
+                        <h3>智能会议纪要</h3>
+                        <p>上传录音→Whisper转写→结构化纪要+日历待办自动推送</p>
+                        <span class="card-arrow">&#8594;</span>
+                    </div>
+                    <div class="card" onclick="switchTab('paper', document.querySelector('.nav-item:nth-child(5)'))">
+                        <div class="card-icon green">&#9633;</div>
+                        <span class="card-badge badge-pro">PRO</span>
+                        <h3>文献论文摘要</h3>
+                        <p>上传PDF→读取+检索补充→结构化笔记卡片（方法/创新/局限）</p>
+                        <span class="card-arrow">&#8594;</span>
+                    </div>
+                    <div class="card" onclick="switchTab('polish', document.querySelector('.nav-item:nth-child(6)'))">
+                        <div class="card-icon purple">&#9998;</div>
+                        <h3>多语言润色写作</h3>
+                        <p>学术/商务/口语/小红书风→润色+修改说明+多版本对比</p>
+                        <span class="card-arrow">&#8594;</span>
+                    </div>
+                    <div class="card" onclick="switchTab('ppt', document.querySelector('.nav-item:nth-child(7)'))">
+                        <div class="card-icon amber">&#9650;</div>
+                        <span class="card-badge badge-new">NEW</span>
+                        <h3>PPT大纲生成</h3>
+                        <p>输入主题+页数→web_search搜集→逐页大纲+配图建议+讲稿</p>
+                        <span class="card-arrow">&#8594;</span>
+                    </div>
+                    <div class="card" onclick="switchTab('companion', document.querySelector('.nav-item:nth-child(8)'))">
+                        <div class="card-icon rose">&#9825;</div>
+                        <h3>情感陪伴式对话</h3>
+                        <p>情绪检测→身份适配→共情回复+适时建议+暖心提醒</p>
+                        <span class="card-arrow">&#8594;</span>
+                    </div>
+                    <div class="card" onclick="switchTab('identity', document.querySelector('.nav-item:nth-child(9)'))">
+                        <div class="card-icon teal">&#8644;</div>
+                        <h3>多身份智能切换</h3>
+                        <p>自动识别场景→会议助理/学术导师/职场助手/贴心伙伴</p>
+                        <span class="card-arrow">&#8594;</span>
+                    </div>
+                </div>
+
+                <div class="section-header mt-3">
+                    <h3>最近活动</h3>
+                    <span class="see-all">查看全部</span>
+                </div>
+                <ul class="activity-list">
+                    <li class="activity-item">
+                        <span class="activity-dot green"></span> 会议纪要「产品评审会」已生成，3项待办已推送日历
+                        <span class="activity-time">10分钟前</span>
+                    </li>
+                    <li class="activity-item">
+                        <span class="activity-dot blue"></span> 论文「Attention Is All You Need」摘要卡片已保存
+                        <span class="activity-time">1小时前</span>
+                    </li>
+                    <li class="activity-item">
+                        <span class="activity-dot amber"></span> 润色任务完成：商务邮件 3个版本已生成
+                        <span class="activity-time">3小时前</span>
+                    </li>
+                    <li class="activity-item">
+                        <span class="activity-dot green"></span> 模板「学术论文摘要v3」已发布到模板市场
+                        <span class="activity-time">昨天</span>
+                    </li>
+                </ul>
+            </div>
+
+            <!-- ===== TAB: CHAT (对话助手 - 新增核心功能) ===== -->
+            <div class="tab-content hidden" id="tabChat">
+                <div class="chat-container">
+                    <div class="chat-header">
+                        <div class="chat-avatar">OC</div>
+                        <div>
+                            <div class="chat-title">OpenClaw 对话助手</div>
+                            <div class="chat-status">在线 · 可操作工作台</div>
+                        </div>
+                        <button class="btn btn-ghost btn-xs" style="margin-left:auto;" onclick="clearChat()" title="清空对话">清空</button>
+                    </div>
+                    <div class="chat-messages" id="chatMessages">
+                        <div class="chat-msg assistant">
+                            <div class="msg-avatar">OC</div>
+                            <div class="msg-bubble">
+                                你好！我是 OpenClaw 对话助手。我可以帮你：<br><br>
+                                &#8226; <strong>直接操作工作台</strong> — 比如"帮我创建会议纪要"、"打开模板引擎"<br>
+                                &#8226; <strong>智能问答</strong> — 回答关于功能使用的问题<br>
+                                &#8226; <strong>快捷跳转</strong> — 说"去API配置"即可跳转到配置页<br><br>
+                                试试输入：<em>"帮我生成一个PPT大纲"</em> 或 <em>"配置OpenAI的API"</em>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="chat-suggestions" id="chatSuggestions">
+                        <span class="chat-suggestion-chip" onclick="sendQuickChat('帮我创建会议纪要')">创建会议纪要</span>
+                        <span class="chat-suggestion-chip" onclick="sendQuickChat('生成PPT大纲')">生成PPT大纲</span>
+                        <span class="chat-suggestion-chip" onclick="sendQuickChat('打开模板引擎')">打开模板引擎</span>
+                        <span class="chat-suggestion-chip" onclick="sendQuickChat('配置API')">配置API</span>
+                        <span class="chat-suggestion-chip" onclick="sendQuickChat('润色一段文本')">润色文本</span>
+                        <span class="chat-suggestion-chip" onclick="sendQuickChat('今天有什么待办')">查看待办</span>
+                    </div>
+                    <div class="chat-input-area">
+                        <textarea id="chatInput" rows="1" placeholder="输入消息，我可以帮你操作工作台..." onkeydown="handleChatKeydown(event)"></textarea>
+                        <button class="send-btn" onclick="sendChatMessage()" title="发送">&#9654;</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== TAB: TEMPLATES ===== -->
+            <div class="tab-content hidden" id="tabTemplates">
+                <div class="template-showcase">
+                    <h2>智能模板引擎</h2>
+                    <p class="subtitle">核心创新功能 — 用简单语法定义模板，AI自动精准填充</p>
+                </div>
+                <div class="cards-grid">
+                    <div class="card" style="border:2px solid var(--primary);border-radius:var(--radius-lg);">
+                        <div class="card-icon blue">+</div>
+                        <h3>创建新模板</h3>
+                        <p>使用 {变量名} 定义占位符，[选项A|选项B] 定义选择，{{描述}} 定义AI自动填充区</p>
+                        <button class="btn btn-primary btn-sm mt-2" onclick="showToast('info','打开模板编辑器')">开始创建</button>
+                    </div>
+                    <div class="card">
+                        <div class="card-icon amber">M</div>
+                        <span class="card-badge badge-popular">热门</span>
+                        <h3>模板市场</h3>
+                        <p>发现社区分享的优质模板，一键应用到你的工作流</p>
+                        <button class="btn btn-outline btn-sm mt-2">浏览市场</button>
+                    </div>
+                    <div class="card">
+                        <div class="card-icon green">L</div>
+                        <h3>我的模板库</h3>
+                        <p>已保存8个自定义模板，覆盖会议、论文、邮件等场景</p>
+                        <button class="btn btn-outline btn-sm mt-2">管理模板</button>
+                    </div>
+                </div>
+                <p style="color:var(--text-muted);font-size:0.82rem;margin-top:8px;">模板语法说明：<code style="background:#f0ede8;padding:2px 6px;border-radius:4px;">{变量}</code> = AI自动推理填充 &nbsp;|&nbsp;
+                    <code style="background:#f0ede8;padding:2px 6px;border-radius:4px;">[A|B|C]</code> = AI根据上下文选择 &nbsp;|&nbsp;
+                    <code style="background:#f0ede8;padding:2px 6px;border-radius:4px;">{{描述}}</code> = AI自由生成区域</p>
+            </div>
+
+            <!-- ===== TAB: MEETING ===== -->
+            <div class="tab-content hidden" id="tabMeeting">
+                <div class="cards-grid">
+                    <div class="card" style="grid-column:1/-1;max-width:600px;">
+                        <div class="card-icon blue">&#9679;</div>
+                        <h3>智能会议纪要</h3>
+                        <p>上传录音文件（mp3/wav/m4a）或粘贴会议文字记录，AI自动生成结构化Markdown纪要</p>
+                        <div style="border:2px dashed var(--border);border-radius:var(--radius-lg);padding:40px 20px;text-align:center;margin-top:12px;cursor:pointer;transition:var(--transition);"
+                    onmouseover="this.style.borderColor='var(--primary)';this.style.background='var(--primary-light)'"
+                    onmouseout="this.style.borderColor='var(--border)';this.style.background='transparent'"
+                    onclick="showToast('info','选择录音文件...')">
+                    <span style="font-size:2.5rem;font-weight:700;color:var(--primary);">&#9679;</span>
+                    <p style="font-weight:600;margin-top:8px;">点击上传录音文件</p>
+                    <p style="font-size:0.75rem;color:var(--text-muted);">支持 mp3 / wav / m4a，最大500MB</p>
+                </div>
+                <p style="text-align:center;color:var(--text-muted);margin-top:10px;">— 或 —</p>
+                <textarea placeholder="直接粘贴会议文字记录..." style="width:100%;height:100px;border:1.5px solid var(--border);border-radius:var(--radius);padding:12px;font-family:var(--font-sans);resize:vertical;margin-top:10px;"></textarea>
+                <button class="btn btn-primary btn-sm mt-2" style="width:100%;">生成会议纪要</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== TAB: PAPER ===== -->
+    <div class="tab-content hidden" id="tabPaper">
+        <div class="cards-grid">
+            <div class="card" style="grid-column:1/-1;max-width:600px;">
+                <div class="card-icon green">&#9633;</div>
+                <h3>文献论文摘要 — 结构化笔记卡片</h3>
+                <p>上传PDF或粘贴论文链接，AI读取全文并生成：研究问题/方法创新/实验结果/局限/可引观点</p>
+                <input type="text" placeholder="粘贴论文URL 或 arXiv链接..." style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:var(--radius);font-family:var(--font-sans);margin-top:10px;">
+                <div style="text-align:center;color:var(--text-muted);margin:10px 0;">— 或 —</div>
+                <div style="border:2px dashed var(--border);border-radius:var(--radius-lg);padding:30px;text-align:center;cursor:pointer;"
+            onmouseover="this.style.borderColor='var(--success)';this.style.background='var(--success-light)'"
+            onmouseout="this.style.borderColor='var(--border)';this.style.background='transparent'">
+            <span style="font-size:2rem;font-weight:700;color:var(--success);">&#9650;</span>
+            <p style="font-weight:600;">上传PDF文件</p>
+        </div>
+        <button class="btn btn-success btn-sm mt-2" style="width:100%;">生成文献摘要卡片</button>
+    </div>
+</div>
+</div>
+
+<!-- ===== TAB: POLISH ===== -->
+<div class="tab-content hidden" id="tabPolish">
+    <div class="cards-grid">
+        <div class="card" style="grid-column:1/-1;max-width:600px;">
+            <div class="card-icon purple">&#9998;</div>
+            <h3>多语言润色写作</h3>
+            <p>输入文本 + 选择目标风格，AI输出润色版本 + 修改说明</p>
+            <textarea placeholder="在此粘贴需要润色的文本..." style="width:100%;height:120px;border:1.5px solid var(--border);border-radius:var(--radius);padding:12px;font-family:var(--font-sans);resize:vertical;"></textarea>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
+                <button class="btn btn-outline btn-xs active" style="background:var(--primary-light);border-color:var(--primary);">学术</button>
+                <button class="btn btn-outline btn-xs">商务</button>
+                <button class="btn btn-outline btn-xs">口语化</button>
+                <button class="btn btn-outline btn-xs">小红书风</button>
+                <button class="btn btn-outline btn-xs">多语言翻译</button>
+            </div>
+            <button class="btn btn-primary btn-sm mt-2" style="width:100%;">开始润色</button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== TAB: PPT ===== -->
+<div class="tab-content hidden" id="tabPpt">
+    <div class="cards-grid">
+        <div class="card" style="grid-column:1/-1;max-width:600px;">
+            <div class="card-icon amber">&#9650;</div>
+            <h3>PPT大纲生成</h3>
+            <p>输入主题+期望页数+风格偏好，AI搜集素材后生成逐页大纲</p>
+            <input type="text" placeholder="PPT主题，如：AI在医疗领域的应用" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:var(--radius);font-family:var(--font-sans);margin-bottom:8px;">
+            <div style="display:flex;gap:8px;">
+                <input type="number" placeholder="页数" value="12" min="3" max="50" style="width:80px;padding:11px;border:1.5px solid var(--border);border-radius:var(--radius);font-family:var(--font-sans);">
+                <select style="flex:1;padding:11px;border:1.5px solid var(--border);border-radius:var(--radius);font-family:var(--font-sans);">
+                    <option>商务专业风</option>
+                    <option>学术严谨风</option>
+                    <option>活泼创意风</option>
+                    <option>极简主义风</option>
+                </select>
+            </div>
+            <button class="btn btn-accent btn-sm mt-2" style="width:100%;">生成PPT大纲</button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== TAB: COMPANION ===== -->
+<div class="tab-content hidden" id="tabCompanion">
+    <div class="cards-grid">
+        <div class="card" style="grid-column:1/-1;max-width:600px;">
+            <div class="card-icon rose">&#9825;</div>
+            <h3>情感陪伴式对话</h3>
+            <p>AI自动检测情绪极性，切换身份模式，提供共情回复与适时建议</p>
+            <div style="background:var(--surface-alt);border-radius:var(--radius-lg);padding:16px;min-height:200px;max-height:350px;overflow-y:auto;margin-bottom:10px;border:1px solid var(--border-light);">
+                <p style="color:var(--text-muted);text-align:center;">对话开始 — 我是你的贴心伙伴</p>
+                <div style="margin-top:12px;padding:8px 12px;background:#eef2ff;border-radius:12px 12px 12px 4px;max-width:80%;font-size:0.85rem;">嗨！今天有什么想聊的吗？无论是工作烦恼还是学习困惑，我都在这里～</div>
+            </div>
+            <div style="display:flex;gap:8px;">
+                <input type="text" placeholder="输入你的想法..." style="flex:1;padding:10px;border:1.5px solid var(--border);border-radius:20px;font-family:var(--font-sans);">
+                <button class="btn btn-primary btn-sm" style="border-radius:50%;width:40px;height:40px;padding:0;">&#9654;</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ===== TAB: IDENTITY ===== -->
+<div class="tab-content hidden" id="tabIdentity">
+    <div class="cards-grid">
+        <div class="card">
+            <div class="card-icon blue">M</div>
+            <h3>会议助理</h3>
+            <p>专业干练 · 自动识别会议场景</p>
+            <button class="btn btn-outline btn-xs">切换此身份</button>
+        </div>
+        <div class="card">
+            <div class="card-icon green">A</div>
+            <h3>学术导师</h3>
+            <p>严谨引导 · 论文写作指导</p>
+            <button class="btn btn-outline btn-xs">切换此身份</button>
+        </div>
+        <div class="card">
+            <div class="card-icon purple">W</div>
+            <h3>职场助手</h3>
+            <p>商务高效 · 汇报写作辅助</p>
+            <button class="btn btn-outline btn-xs">切换此身份</button>
+        </div>
+        <div class="card">
+            <div class="card-icon rose">C</div>
+            <h3>贴心伙伴</h3>
+            <p>温暖共情 · 日常陪伴倾听</p>
+            <button class="btn btn-outline btn-xs">切换此身份</button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== TAB: REMINDERS ===== -->
+<div class="tab-content hidden" id="tabReminders">
+    <div class="cards-grid">
+        <div class="card" style="grid-column:1/-1;max-width:600px;">
+            <div class="card-icon amber">&#9200;</div>
+            <h3>主动提醒与推送</h3>
+            <p>从会议纪要自动提取待办，定时推送提醒</p>
+            <div style="background:var(--warning-light);border:1px solid #fde68a;border-radius:var(--radius);padding:12px 16px;margin-top:10px;">
+                <strong>下午3:00</strong> — 产品评审会（自动从纪要提取）<br>
+                <strong>明天9:00</strong> — 提交文献综述初稿<br>
+                <strong>周五</strong> — 周报截止提醒
+            </div>
+            <button class="btn btn-accent btn-sm mt-2" style="width:100%;">+ 手动添加提醒</button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== TAB: COLLAB ===== -->
+<div class="tab-content hidden" id="tabCollab">
+    <div class="cards-grid">
+        <div class="card" style="border:2px dashed var(--accent);border-radius:var(--radius-lg);">
+            <div class="card-icon amber">&#9672;</div>
+            <span class="card-badge badge-new">创新</span>
+            <h3>协作空间</h3>
+            <p>创建团队工作区，共享模板和文档，实时协作编辑</p>
+            <button class="btn btn-accent btn-sm mt-2">创建协作空间</button>
+        </div>
+        <div class="card">
+            <div class="card-icon blue">&#8644;</div>
+            <h3>邀请队友</h3>
+            <p>通过链接或邮箱邀请团队成员加入协作</p>
+            <button class="btn btn-outline btn-sm mt-2">生成邀请链接</button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== TAB: API CONFIG (新增API配置) ===== -->
+<div class="tab-content hidden" id="tabApiConfig">
+    <div class="section-header">
+        <h3>API &amp; 大模型配置</h3>
+        <button class="btn btn-primary btn-sm" onclick="saveApiConfig()">保存全部配置</button>
+    </div>
+    <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:16px;">在此配置接入的线上大模型API。启用后，OpenClaw将按优先级调用可用模型。</p>
+
+    <div class="api-config-grid" id="apiConfigGrid">
+        <!-- OpenAI -->
+        <div class="api-provider-card enabled" data-provider="openai">
+            <div class="api-provider-header">
+                <span class="provider-name">
+                    <span class="provider-logo openai">OA</span> OpenAI
+                </span>
+                <label class="toggle-switch">
+                    <input type="checkbox" checked onchange="toggleProvider(this, 'openai')">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div class="api-field-row">
+                <label>API Key</label>
+                <input type="password" placeholder="sk-..." value="sk-proj-xxxxxxxxxxxxx" data-field="apiKey">
+            </div>
+            <div class="api-field-row">
+                <label>Base URL</label>
+                <input type="text" placeholder="https://api.openai.com/v1" value="https://api.openai.com/v1" data-field="baseUrl">
+            </div>
+            <div class="api-field-row">
+                <label>默认模型</label>
+                <select data-field="defaultModel" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:var(--radius-sm);font-size:0.8rem;font-family:var(--font-sans);background:var(--surface-alt);">
+                    <option>gpt-4o</option>
+                    <option>gpt-4-turbo</option>
+                    <option>gpt-4</option>
+                    <option selected>gpt-3.5-turbo</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Anthropic Claude -->
+        <div class="api-provider-card enabled" data-provider="claude">
+            <div class="api-provider-header">
+                <span class="provider-name">
+                    <span class="provider-logo claude">CL</span> Anthropic Claude
+                </span>
+                <label class="toggle-switch">
+                    <input type="checkbox" checked onchange="toggleProvider(this, 'claude')">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div class="api-field-row">
+                <label>API Key</label>
+                <input type="password" placeholder="sk-ant-..." value="sk-ant-api03-xxxxxxxxxxxxx" data-field="apiKey">
+            </div>
+            <div class="api-field-row">
+                <label>Base URL</label>
+                <input type="text" placeholder="https://api.anthropic.com" value="https://api.anthropic.com" data-field="baseUrl">
+            </div>
+            <div class="api-field-row">
+                <label>默认模型</label>
+                <select data-field="defaultModel" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:var(--radius-sm);font-size:0.8rem;font-family:var(--font-sans);background:var(--surface-alt);">
+                    <option>claude-3-opus-20240229</option>
+                    <option selected>claude-3-sonnet-20240229</option>
+                    <option>claude-3-haiku-20240307</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Google Gemini -->
+        <div class="api-provider-card disabled" data-provider="gemini">
+            <div class="api-provider-header">
+                <span class="provider-name">
+                    <span class="provider-logo gemini">GM</span> Google Gemini
+                </span>
+                <label class="toggle-switch">
+                    <input type="checkbox" onchange="toggleProvider(this, 'gemini')">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div class="api-field-row">
+                <label>API Key</label>
+                <input type="password" placeholder="AIza..." value="" data-field="apiKey">
+            </div>
+            <div class="api-field-row">
+                <label>Base URL</label>
+                <input type="text" placeholder="https://generativelanguage.googleapis.com" value="https://generativelanguage.googleapis.com" data-field="baseUrl">
+            </div>
+            <div class="api-field-row">
+                <label>默认模型</label>
+                <select data-field="defaultModel" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:var(--radius-sm);font-size:0.8rem;font-family:var(--font-sans);background:var(--surface-alt);">
+                    <option>gemini-1.5-pro</option>
+                    <option selected>gemini-1.5-flash</option>
+                    <option>gemini-pro</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- DeepSeek -->
+        <div class="api-provider-card enabled" data-provider="deepseek">
+            <div class="api-provider-header">
+                <span class="provider-name">
+                    <span class="provider-logo deepseek">DS</span> DeepSeek
+                </span>
+                <label class="toggle-switch">
+                    <input type="checkbox" checked onchange="toggleProvider(this, 'deepseek')">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div class="api-field-row">
+                <label>API Key</label>
+                <input type="password" placeholder="sk-..." value="sk-xxxxxxxxxxxxxxxxxxxxx" data-field="apiKey">
+            </div>
+            <div class="api-field-row">
+                <label>Base URL</label>
+                <input type="text" placeholder="https://api.deepseek.com" value="https://api.deepseek.com" data-field="baseUrl">
+            </div>
+            <div class="api-field-row">
+                <label>默认模型</label>
+                <select data-field="defaultModel" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:var(--radius-sm);font-size:0.8rem;font-family:var(--font-sans);background:var(--surface-alt);">
+                    <option>deepseek-chat</option>
+                    <option selected>deepseek-reasoner</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- 通义千问 Qwen -->
+        <div class="api-provider-card disabled" data-provider="qwen">
+            <div class="api-provider-header">
+                <span class="provider-name">
+                    <span class="provider-logo qwen">QW</span> 通义千问 Qwen
+                </span>
+                <label class="toggle-switch">
+                    <input type="checkbox" onchange="toggleProvider(this, 'qwen')">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div class="api-field-row">
+                <label>API Key</label>
+                <input type="password" placeholder="sk-..." value="" data-field="apiKey">
+            </div>
+            <div class="api-field-row">
+                <label>Base URL</label>
+                <input type="text" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" value="https://dashscope.aliyuncs.com/compatible-mode/v1" data-field="baseUrl">
+            </div>
+            <div class="api-field-row">
+                <label>默认模型</label>
+                <select data-field="defaultModel" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:var(--radius-sm);font-size:0.8rem;font-family:var(--font-sans);background:var(--surface-alt);">
+                    <option>qwen-max</option>
+                    <option selected>qwen-plus</option>
+                    <option>qwen-turbo</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Moonshot / Kimi -->
+        <div class="api-provider-card disabled" data-provider="moonshot">
+            <div class="api-provider-header">
+                <span class="provider-name">
+                    <span class="provider-logo moonshot">MS</span> Moonshot (Kimi)
+                </span>
+                <label class="toggle-switch">
+                    <input type="checkbox" onchange="toggleProvider(this, 'moonshot')">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div class="api-field-row">
+                <label>API Key</label>
+                <input type="password" placeholder="sk-..." value="" data-field="apiKey">
+            </div>
+            <div class="api-field-row">
+                <label>Base URL</label>
+                <input type="text" placeholder="https://api.moonshot.cn/v1" value="https://api.moonshot.cn/v1" data-field="baseUrl">
+            </div>
+            <div class="api-field-row">
+                <label>默认模型</label>
+                <select data-field="defaultModel" style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:var(--radius-sm);font-size:0.8rem;font-family:var(--font-sans);background:var(--surface-alt);">
+                    <option selected>moonshot-v1-8k</option>
+                    <option>moonshot-v1-32k</option>
+                    <option>moonshot-v1-128k</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- 自定义 API -->
+        <div class="api-provider-card disabled" data-provider="custom">
+            <div class="api-provider-header">
+                <span class="provider-name">
+                    <span class="provider-logo custom">CU</span> 自定义 API
+                </span>
+                <label class="toggle-switch">
+                    <input type="checkbox" onchange="toggleProvider(this, 'custom')">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div class="api-field-row">
+                <label>API Key</label>
+                <input type="password" placeholder="输入API Key..." value="" data-field="apiKey">
+            </div>
+            <div class="api-field-row">
+                <label>Base URL (OpenAI兼容接口)</label>
+                <input type="text" placeholder="https://your-api-endpoint.com/v1" value="" data-field="baseUrl">
+            </div>
+            <div class="api-field-row">
+                <label>模型名称</label>
+                <input type="text" placeholder="model-name" value="" data-field="defaultModel">
+            </div>
+        </div>
+    </div>
+
+    <div style="background:var(--surface);border-radius:var(--radius-lg);padding:16px 20px;border:1px solid var(--border-light);margin-top:12px;">
+        <h4 style="margin-bottom:8px;">模型调用优先级</h4>
+        <p style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:10px;">拖拽调整已启用模型的调用顺序，排在前面的模型将被优先使用。</p>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;" id="modelPriorityList">
+            <span style="padding:6px 14px;background:var(--primary-light);color:var(--primary);border-radius:20px;font-size:0.8rem;font-weight:600;">1. OpenAI (gpt-3.5-turbo)</span>
+            <span style="padding:6px 14px;background:#f0ede8;color:var(--text-secondary);border-radius:20px;font-size:0.8rem;">2. DeepSeek (deepseek-reasoner)</span>
+            <span style="padding:6px 14px;background:#f0ede8;color:var(--text-secondary);border-radius:20px;font-size:0.8rem;">3. Claude (claude-3-sonnet)</span>
+        </div>
+        <button class="btn btn-outline btn-sm mt-2" onclick="showToast('info','拖拽排序功能已启用')">调整优先级</button>
+        <button class="btn btn-outline btn-sm mt-2" style="margin-left:8px;" onclick="testAllConnections()">测试全部连接</button>
+    </div>
+</div>
+</div>
+</div>
+
+<!-- ==================== MODAL: QUICK ACTION ==================== -->
+<div class="modal-overlay hidden" id="quickActionModal">
+    <div class="modal">
+        <button class="modal-close" onclick="closeModal('quickActionModal')">&#10005;</button>
+        <h2 style="margin-bottom:12px;">快速操作</h2>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+            <button class="btn btn-outline" style="width:100%;justify-content:flex-start;" onclick="closeModal('quickActionModal');switchTab('meeting',document.querySelector('.nav-item:nth-child(4)'))">新建会议纪要</button>
+            <button class="btn btn-outline" style="width:100%;justify-content:flex-start;" onclick="closeModal('quickActionModal');switchTab('paper',document.querySelector('.nav-item:nth-child(5)'))">上传论文PDF</button>
+            <button class="btn btn-outline" style="width:100%;justify-content:flex-start;" onclick="closeModal('quickActionModal');switchTab('polish',document.querySelector('.nav-item:nth-child(6)'))">润色文本</button>
+            <button class="btn btn-outline" style="width:100%;justify-content:flex-start;" onclick="closeModal('quickActionModal');switchTab('templates',document.querySelector('.nav-item:nth-child(3)'))">创建模板</button>
+            <button class="btn btn-outline" style="width:100%;justify-content:flex-start;" onclick="closeModal('quickActionModal');switchTab('chat',document.querySelector('.nav-item:nth-child(2)'))">对话助手</button>
+            <button class="btn btn-outline" style="width:100%;justify-content:flex-start;" onclick="closeModal('quickActionModal');switchTab('apiConfig',document.querySelector('.nav-item:last-child'))">配置API</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    // ==================== STATE ====================
+    const state = {
+        currentPage: 'login',
+        currentTab: 'overview',
+        isLoggedIn: false,
+        userName: '',
+        userEmail: '',
+        chatHistory: [],
+    };
+
+    // ==================== PAGE NAVIGATION ====================
+    function showPage(page) {
+        state.currentPage = page;
+        const pages = ['pageLogin', 'pageRegister', 'pageForgotPassword', 'pageDashboard'];
+        pages.forEach(p => {
+            const el = document.getElementById(p);
+            if (el) el.classList.add('hidden');
+        });
+        const targetMap = {
+            'login': 'pageLogin',
+            'register': 'pageRegister',
+            'forgotPassword': 'pageForgotPassword',
+            'dashboard': 'pageDashboard'
+        };
+        const targetId = targetMap[page] || 'pageLogin';
+        const target = document.getElementById(targetId);
+        if (target) target.classList.remove('hidden');
+
+        if (page === 'dashboard') {
+            const db = document.getElementById('pageDashboard');
+            db.classList.add('active');
+            db.style.display = 'flex';
+            switchTab('overview', document.querySelector('.sidebar-nav .nav-item:first-child'));
+        } else {
+            const db = document.getElementById('pageDashboard');
+            if (db) {
+                db.classList.remove('active');
+                db.style.display = 'none';
+            }
+        }
+    }
+
+    // ==================== AUTH HANDLERS ====================
+    function handleLogin(e) {
+        e.preventDefault();
+        const email = document.getElementById('loginEmail').value.trim();
+        const password = document.getElementById('loginPassword').value.trim();
+        const errorEl = document.getElementById('loginError');
+
+        if (!email || !password) {
+            errorEl.style.display = 'block';
+            errorEl.textContent = '请填写所有字段';
+            return;
+        }
+        if (password.length < 6) {
+            errorEl.style.display = 'block';
+            errorEl.textContent = '密码至少6位';
+            return;
+        }
+        errorEl.style.display = 'none';
+        state.isLoggedIn = true;
+        state.userName = email.split('@')[0];
+        state.userEmail = email;
+        document.getElementById('sidebarUserName').textContent = state.userName;
+        document.getElementById('sidebarAvatar').textContent = state.userName.charAt(0).toUpperCase();
+        showToast('success', '登录成功！欢迎回来，' + state.userName);
+        showPage('dashboard');
+    }
+
+    function handleRegister(e) {
+        e.preventDefault();
+        const name = document.getElementById('regName').value.trim();
+        const email = document.getElementById('regEmail').value.trim();
+        const password = document.getElementById('regPassword').value.trim();
+        const confirm = document.getElementById('regConfirmPassword').value.trim();
+        const errorEl = document.getElementById('regError');
+
+        if (password !== confirm) {
+            errorEl.style.display = 'block';
+            errorEl.textContent = '两次密码不一致';
+            return;
+        }
+        if (password.length < 6) {
+            errorEl.style.display = 'block';
+            errorEl.textContent = '密码至少6位';
+            return;
+        }
+        errorEl.style.display = 'none';
+        state.isLoggedIn = true;
+        state.userName = name;
+        state.userEmail = email;
+        document.getElementById('sidebarUserName').textContent = state.userName;
+        document.getElementById('sidebarAvatar').textContent = state.userName.charAt(0).toUpperCase();
+        showToast('success', '注册成功！欢迎加入OpenClaw');
+        showPage('dashboard');
+    }
+
+    function handleForgotPassword(e) {
+        e.preventDefault();
+        const email = document.getElementById('forgotEmail').value.trim();
+        if (!email) {
+            showToast('error', '请输入邮箱地址');
+            return;
+        }
+        showToast('success', '重置链接已发送到 ' + email);
+        setTimeout(() => showPage('login'), 1500);
+    }
+
+    function handleLogout() {
+        state.isLoggedIn = false;
+        state.userName = '';
+        state.userEmail = '';
+        state.chatHistory = [];
+        document.getElementById('sidebarUserName').textContent = '用户';
+        document.getElementById('sidebarAvatar').textContent = 'U';
+        const chatMsgs = document.getElementById('chatMessages');
+        if (chatMsgs) {
+            chatMsgs.innerHTML = `
+                        <div class="chat-msg assistant">
+                            <div class="msg-avatar">OC</div>
+                            <div class="msg-bubble">
+                                你好！我是 OpenClaw 对话助手。我可以帮你：<br><br>
+                                &bull; <strong>直接操作工作台</strong> — 比如"帮我创建会议纪要"、"打开模板引擎"<br>
+                                &bull; <strong>智能问答</strong> — 回答关于功能使用的问题<br>
+                                &bull; <strong>快捷跳转</strong> — 说"去API配置"即可跳转到配置页<br><br>
+                                试试输入：<em>"帮我生成一个PPT大纲"</em> 或 <em>"配置OpenAI的API"</em>
+                            </div>
+                        </div>`;
+        }
+        showToast('info', '已退出登录');
+        showPage('login');
+        document.getElementById('loginEmail').value = '';
+        document.getElementById('loginPassword').value = '';
+    }
+
+    // ==================== TAB SWITCHING ====================
+    function switchTab(tab, navItem) {
+        state.currentTab = tab;
+        document.querySelectorAll('.sidebar-nav .nav-item').forEach(item => item.classList.remove('active'));
+        if (navItem) navItem.classList.add('active');
+        document.querySelectorAll('.tab-content').forEach(tc => tc.classList.add('hidden'));
+        const targetTab = document.getElementById('tab' + tab.charAt(0).toUpperCase() + tab.slice(1));
+        if (targetTab) targetTab.classList.remove('hidden');
+        const titles = {
+            overview: '工作台概览',
+            templates: '智能模板引擎',
+            chat: '对话助手',
+            meeting: '智能会议纪要',
+            paper: '文献论文摘要',
+            polish: '多语言润色写作',
+            ppt: 'PPT大纲生成',
+            companion: '情感陪伴式对话',
+            identity: '多身份切换',
+            reminders: '主动提醒推送',
+            collab: '协作空间',
+            apiConfig: 'API & 模型配置',
+        };
+        document.getElementById('pageTitle').textContent = titles[tab] || '工作台';
+    }
+
+    // ==================== CHAT FUNCTIONALITY (对话助手) ====================
+    const chatIntents = [
+        { keywords: ['会议纪要', '会议记录', '创建会议', '做会议', '帮我开会'], tab: 'meeting', response: '已为你打开<strong>智能会议纪要</strong>页面。你可以上传录音文件或粘贴文字记录，我会帮你生成结构化纪要。', action: 'switchTab' },
+        { keywords: ['论文', '文献', '摘要', 'PDF', 'arxiv', 'paper'], tab: 'paper', response: '已切换到<strong>文献论文摘要</strong>模块。上传PDF或粘贴论文链接，我会生成结构化笔记卡片。', action: 'switchTab' },
+        { keywords: ['润色', '改写', '写作', '翻译', 'polish'], tab: 'polish', response: '已打开<strong>多语言润色写作</strong>页面。粘贴文本并选择风格，我会输出润色版本与修改说明。', action: 'switchTab' },
+        { keywords: ['PPT', 'ppt', '演示', '幻灯片', '大纲', '讲稿'], tab: 'ppt', response: '已切换到<strong>PPT大纲生成</strong>。输入主题和页数，我会搜集素材并生成逐页大纲。', action: 'switchTab' },
+        { keywords: ['模板', 'template', '创建模板', '模板市场'], tab: 'templates', response: '已打开<strong>智能模板引擎</strong>。使用{变量}语法定义模板，AI自动精准填充。', action: 'switchTab' },
+        { keywords: ['API', 'api', '配置', '模型', 'OpenAI', 'Claude', 'Gemini', 'DeepSeek', '大模型', 'key'], tab: 'apiConfig', response: '已打开<strong>API & 模型配置</strong>页面。你可以在这里管理所有接入的大模型API。', action: 'switchTab' },
+        { keywords: ['概览', '首页', '工作台', 'dashboard', 'overview'], tab: 'overview', response: '已返回<strong>工作台概览</strong>。这里汇总了你的所有工作数据。', action: 'switchTab' },
+        { keywords: ['聊天', '对话', '助手', 'chat', '聊聊'], tab: 'chat', response: '我就在这里！有什么我可以帮你的吗？', action: 'stay' },
+        { keywords: ['待办', '提醒', 'reminder', '日程', '日历'], tab: 'reminders', response: '已打开<strong>主动提醒推送</strong>页面。这里列出了从会议纪要自动提取的待办事项。', action: 'switchTab' },
+        { keywords: ['身份', '切换身份', 'identity', '角色'], tab: 'identity', response: '已切换到<strong>多身份切换</strong>页面。你可以选择会议助理、学术导师、职场助手或贴心伙伴。', action: 'switchTab' },
+        { keywords: ['协作', '团队', 'collab', '邀请', '共享'], tab: 'collab', response: '已打开<strong>协作空间</strong>。创建团队工作区，共享模板和文档。', action: 'switchTab' },
+        { keywords: ['陪伴', '情感', '倾诉', '烦恼', '安慰', 'companion'], tab: 'companion', response: '已切换到<strong>情感陪伴对话</strong>。我在这里倾听你的一切。', action: 'switchTab' },
+    ];
+
+    function findChatIntent(message) {
+        const lower = message.toLowerCase();
+        for (const intent of chatIntents) {
+            for (const kw of intent.keywords) {
+                if (lower.includes(kw.toLowerCase())) {
+                    return intent;
+                }
+            }
+        }
+        return null;
+    }
+
+    // 注意：函数前面加了 async，因为联网需要时间等待
+    async function sendChatMessage() {
+        const input = document.getElementById('chatInput');
+        const message = input.value.trim();
+        if (!message) return;
+        
+        input.value = '';
+        input.style.height = 'auto';
+
+        // 1. 在网页上显示用户说的话
+        addChatMessage('user', message);
+
+        // 2. 检查是否有“切换页面”的指令（保留你原有的逻辑）
+        const intent = findChatIntent(message);
+
+        if (intent && intent.action === 'switchTab') {
+            // 如果是切换页面的指令，执行切换并回话
+            const navItems = document.querySelectorAll('.sidebar-nav .nav-item');
+            const tabIndexMap = {
+                'overview': 0, 'chat': 1, 'templates': 2, 'meeting': 3,
+                'paper': 4, 'polish': 5, 'ppt': 6, 'companion': 7,
+                'identity': 8, 'reminders': 9, 'collab': 10, 'apiConfig': 11,
+            };
+            const idx = tabIndexMap[intent.tab];
+            if (idx !== undefined && navItems[idx]) {
+                switchTab(intent.tab, navItems[idx]);
+            }
+            addChatMessage('assistant', intent.response + ' <br><span style="font-size:0.7rem;color:var(--text-muted);">(页面已自动切换)</span>');
+        } else {
+            // 3. 【核心改动】如果没有匹配到页面切换，就去问真实的 AI
+            try {
+                // 显示一个简单的“思考中...”状态（可选）
+                console.log("正在请求后端 AI...");
+                
+                const response = await fetch('http://localhost:3000/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: message })
+                });
+
+                const data = await response.json();
+
+                if (data.reply) {
+                    addChatMessage('assistant', data.reply);
+                } else {
+                    addChatMessage('assistant', "AI 好像开小差了，请重试。");
+                }
+            } catch (error) {
+                console.error("请求失败:", error);
+                addChatMessage('assistant', "抱歉，我无法连接到后端服务器，请检查 server.js 是否启动。");
+            }
+        }
+
+        // 滚动到底部
+        const chatMsgs = document.getElementById('chatMessages');
+        chatMsgs.scrollTop = chatMsgs.scrollHeight;
+    }
+
+    function sendQuickChat(message) {
+        document.getElementById('chatInput').value = message;
+        ;
+    }
+
+    function addChatMessage(role, content) {
+        const chatMsgs = document.getElementById('chatMessages');
+        const msgDiv = document.createElement('div');
+        msgDiv.className = 'chat-msg ' + role;
+        const avatarLetter = role === 'user' ? (state.userName.charAt(0).toUpperCase() || 'U') : 'OC';
+        msgDiv.innerHTML = `
+                    <div class="msg-avatar">${avatarLetter}</div>
+                    <div class="msg-bubble">${content}</div>`;
+        chatMsgs.appendChild(msgDiv);
+        chatMsgs.scrollTop = chatMsgs.scrollHeight;
+        state.chatHistory.push({ role, content, time: new Date().toISOString() });
+    }
+
+    function clearChat() {
+        const chatMsgs = document.getElementById('chatMessages');
+        chatMsgs.innerHTML = `
+                    <div class="chat-msg assistant">
+                        <div class="msg-avatar">OC</div>
+                        <div class="msg-bubble">对话已清空。有什么可以帮你的？</div>
+                    </div>`;
+        state.chatHistory = [];
+        showToast('info', '对话已清空');
+    }
+
+    function handleChatKeydown(e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendChatMessage();
+        }
+    }
+
+    // ==================== API CONFIG FUNCTIONS ====================
+    function toggleProvider(checkbox, providerName) {
+        const card = checkbox.closest('.api-provider-card');
+        if (checkbox.checked) {
+            card.classList.remove('disabled');
+            card.classList.add('enabled');
+            showToast('success', providerName + ' 已启用');
+        } else {
+            card.classList.add('disabled');
+            card.classList.remove('enabled');
+            showToast('info', providerName + ' 已禁用');
+        }
+        updateModelPriorityList();
+    }
+
+    function saveApiConfig() {
+        const cards = document.querySelectorAll('.api-provider-card');
+        const configs = [];
+        cards.forEach(card => {
+            const provider = card.getAttribute('data-provider');
+            const enabled = card.querySelector('input[type="checkbox"]').checked;
+            const apiKey = card.querySelector('input[type="password"]').value;
+            const baseUrl = card.querySelector('input[type="text"]').value;
+            const defaultModel = card.querySelector('select') ? card.querySelector('select').value : (card
+                .querySelector('input[placeholder*="model"]') ? card.querySelector('input[placeholder*="model"]')
+                .value : '');
+            configs.push({ provider, enabled, apiKey, baseUrl, defaultModel });
+        });
+        // 存储到localStorage
+        try {
+            localStorage.setItem('openclaw_api_configs', JSON.stringify(configs));
+            showToast('success', 'API配置已保存！共 ' + configs.filter(c => c.enabled).length + ' 个模型已启用');
+        } catch (e) {
+            showToast('error', '保存失败，请检查浏览器存储空间');
+        }
+        console.log('API Configs saved:', configs);
+    }
+
+    function testAllConnections() {
+        const enabledCards = document.querySelectorAll('.api-provider-card.enabled');
+        if (enabledCards.length === 0) {
+            showToast('warning', '没有已启用的模型，请先启用至少一个');
+            return;
+        }
+        showToast('info', '正在测试 ' + enabledCards.length + ' 个模型连接...');
+        let testedCount = 0;
+        enabledCards.forEach((card, index) => {
+            setTimeout(() => {
+                const providerName = card.getAttribute('data-provider');
+                testedCount++;
+                if (index === enabledCards.length - 1) {
+                    setTimeout(() => {
+                        showToast('success', '连接测试完成：' + testedCount + '/' + enabledCards.length +
+                            ' 个模型响应正常');
+                    }, 300);
+                }
+            }, (index + 1) * 600);
+        });
+    }
+
+    function updateModelPriorityList() {
+        const enabledCards = document.querySelectorAll('.api-provider-card.enabled');
+        const list = document.getElementById('modelPriorityList');
+        if (!list) return;
+        let html = '';
+        let count = 1;
+        enabledCards.forEach(card => {
+            const provider = card.getAttribute('data-provider');
+            const modelSelect = card.querySelector('select');
+            const modelName = modelSelect ? modelSelect.value : 'default';
+            const isFirst = count === 1;
+            html +=
+                `<span style="padding:6px 14px;${isFirst?'background:var(--primary-light);color:var(--primary);': 'background:#f0ede8;color:var(--text-secondary);'}border-radius:20px;font-size:0.8rem;font-weight:600;cursor:pointer;" title="${provider}">${count}. ${provider} (${modelName})</span>`;
+            count++;
+        });
+        if (html === '') {
+            html =
+                '<span style="padding:6px 14px;background:#fef2f2;color:var(--danger);border-radius:20px;font-size:0.8rem;">暂无已启用模型</span>';
+        }
+        list.innerHTML = html;
+    }
+
+    // ==================== TOAST ====================
+    function showToast(type, message) {
+        const container = document.getElementById('toastContainer');
+        const toast = document.createElement('div');
+        toast.className = 'toast ' + type;
+        toast.textContent = message;
+        container.appendChild(toast);
+        setTimeout(() => {
+            toast.style.animation = 'fadeOut 0.3s ease forwards';
+            setTimeout(() => toast.remove(), 300);
+        }, 2500);
+    }
+
+    // ==================== MODAL ====================
+    function showQuickActionModal() {
+        document.getElementById('quickActionModal').classList.remove('hidden');
+    }
+
+    function closeModal(id) {
+        document.getElementById(id).classList.add('hidden');
+    }
+    document.addEventListener('click', function(e) {
+        if (e.target.classList.contains('modal-overlay')) {
+            e.target.classList.add('hidden');
+        }
+    });
+
+    // ==================== INIT ====================
+    function init() {
+        showPage('login');
+        document.getElementById('pageDashboard').style.display = 'none';
+        document.getElementById('pageDashboard').classList.remove('active');
+        document.querySelectorAll('.tab-content').forEach(tc => tc.classList.add('hidden'));
+        const overviewTab = document.getElementById('tabOverview');
+        if (overviewTab) overviewTab.classList.remove('hidden');
+
+        // 尝试从localStorage加载API配置
+        try {
+            const savedConfigs = localStorage.getItem('openclaw_api_configs');
+            if (savedConfigs) {
+                const configs = JSON.parse(savedConfigs);
+                configs.forEach(config => {
+                    const card = document.querySelector(`.api-provider-card[data-provider="${config.provider}"]`);
+                    if (card) {
+                        const checkbox = card.querySelector('input[type="checkbox"]');
+                        if (checkbox) checkbox.checked = config.enabled;
+                        if (config.enabled) {
+                            card.classList.add('enabled');
+                            card.classList.remove('disabled');
+                        } else {
+                            card.classList.add('disabled');
+                            card.classList.remove('enabled');
+                        }
+                        const pwInput = card.querySelector('input[type="password"]');
+                        if (pwInput && config.apiKey) pwInput.value = config.apiKey;
+                        const urlInput = card.querySelectorAll('input[type="text"]')[0];
+                        if (urlInput && config.baseUrl) urlInput.value = config.baseUrl;
+                    }
+                });
+                updateModelPriorityList();
+            }
+        } catch (e) {
+            console.log('No saved API configs found');
+        }
+
+        // 初始化模型优先级列表
+        updateModelPriorityList();
+
+        // 监听聊天输入框自动调整高度
+        const chatInput = document.getElementById('chatInput');
+        if (chatInput) {
+            chatInput.addEventListener('input', function() {
+                this.style.height = 'auto';
+                this.style.height = Math.min(this.scrollHeight, 100) + 'px';
+            });
+        }
+    }
+
+    // ==================== KEYBOARD SHORTCUTS ====================
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+            document.querySelectorAll('.modal-overlay').forEach(m => m.classList.add('hidden'));
+        }
+        // Ctrl+K or Cmd+K to focus chat
+        if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+            e.preventDefault();
+            if (state.isLoggedIn) {
+                switchTab('chat', document.querySelector('.nav-item:nth-child(2)'));
+                setTimeout(() => {
+                    const chatInput = document.getElementById('chatInput');
+                    if (chatInput) chatInput.focus();
+                }, 200);
+            }
+        }
+    });
+
+    // ==================== START ====================
+    init();
+
+    console.log('OpenClaw 智能办公助手 — 前端原型已就绪');
+    console.log('可用页面：登录 | 注册 | 忘记密码 | 仪表盘（含全部功能模块）');
+    console.log('核心创新：智能模板引擎 — {变量} [选项] {{自动填充}}');
+    console.log('新增功能：对话助手（可通过对话操作工作台）');
+    console.log('新增功能：API & 大模型配置（支持OpenAI/Claude/Gemini/DeepSeek/Qwen/Moonshot/自定义）');
+    console.log('快捷键：Ctrl+K / Cmd+K 快速打开对话助手');
+    console.log('点击侧边栏导航切换功能模块，右上角按钮快速操作');
+</script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+# Root — 与各子目录 .gitignore 互补，避免误提交依赖与本地机密
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+.env
+.env.*
+!.env.example
+
+*.sqlite
+*.sqlite3
+**/database.sqlite
+
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# 上传/运行时目录（若存在）
+backend/data/
+uploads/
+temp/

@@ -1,0 +1,1 @@
+将自有品牌图标保存为 **logo.png**（建议 512×512 PNG）放到本目录，可覆盖构建脚本生成的占位图；index.html 中 apple-touch-icon 引用 /logo.png。

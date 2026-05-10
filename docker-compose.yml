@@ -1,0 +1,48 @@
+# OpenClaw：前端 Nginx + 后端 API，一键编排
+# 数据持久化：默认命名卷（uploads 与 SQLite 分卷，避免容器重建丢数据）
+# 容器内外路径仅通过环境变量 OPENCLAW_DATA_DIR / OPENCLAW_UPLOADS_DIR / OPENCLAW_DB_PATH 等传入；
+# 后端代码使用 resolveDataRoot()、resolveOptionalPath() 解析，禁止写死宿主机盘符。
+# 可选：将下方命名卷改为 bind，例如
+#   - ./docker-data/uploads:/var/lib/openclaw/uploads
+#   - ./docker-data/db:/var/lib/openclaw/db
+# 首次 bind 挂载 SQLite 时请在宿主机先 touch 对应 .db/.sqlite 文件。
+
+services:
+  openclaw-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: openclaw-backend:latest
+    container_name: openclaw-backend
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      OPENCLAW_DATA_DIR: /app/data
+      OPENCLAW_UPLOADS_DIR: /var/lib/openclaw/uploads
+      OPENCLAW_DB_PATH: /var/lib/openclaw/db/database.sqlite
+      OPENCLAW_TEMP_DIR: /app/data/temp
+      PYTHON_BIN: python3
+      # 使用 test.db：将 OPENCLAW_DB_PATH 改为 /var/lib/openclaw/db/test.db，并在宿主机 bind 时先 touch 该文件
+    volumes:
+      - openclaw-uploads:/var/lib/openclaw/uploads
+      - openclaw-db:/var/lib/openclaw/db
+      - ./logs:/app/logs
+    expose:
+      - "3000"
+    restart: unless-stopped
+
+  openclaw-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: openclaw-frontend:latest
+    container_name: openclaw-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - openclaw-backend
+    restart: unless-stopped
+
+volumes:
+  openclaw-uploads:
+  openclaw-db:
