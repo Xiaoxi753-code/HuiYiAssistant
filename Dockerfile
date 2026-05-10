@@ -4,6 +4,8 @@
 FROM node:22-alpine AS frontend-builder
 WORKDIR /build/frontend
 COPY frontend/package*.json ./
+# npm runs the frontend postinstall hook during npm ci; copy the hook script first.
+COPY frontend/scripts ./scripts
 RUN npm ci
 COPY frontend/ ./
 RUN npm run build

@@ -2,6 +2,8 @@
 FROM node:22-alpine AS builder
 WORKDIR /app
 COPY package.json package-lock.json* ./
+# npm runs the project postinstall hook during npm ci; copy the hook script first.
+COPY scripts ./scripts
 RUN npm ci
 COPY . .
 RUN npm run build

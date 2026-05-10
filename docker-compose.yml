@@ -13,6 +13,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     image: openclaw-backend:latest
+    pull_policy: build
     container_name: openclaw-backend
     environment:
       NODE_ENV: production
@@ -36,6 +37,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     image: openclaw-frontend:latest
+    pull_policy: build
     container_name: openclaw-frontend
     ports:
       - "8080:80"
