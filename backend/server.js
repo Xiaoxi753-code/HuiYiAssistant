@@ -263,6 +263,24 @@ function ensureTemplatesUserEmailColumn() {
 }
 ensureTemplatesUserEmailColumn();
 
+/** 模板库组织字段：文件夹与标签，避免把路径塞进显示名称 */
+function ensureTemplatesOrganizationColumns() {
+  try {
+    const cols = db.prepare('PRAGMA table_info(templates)').all();
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has('folder_path')) {
+      db.exec('ALTER TABLE templates ADD COLUMN folder_path TEXT DEFAULT ""');
+    }
+    if (!names.has('tags_json')) {
+      db.exec("ALTER TABLE templates ADD COLUMN tags_json TEXT DEFAULT '[]'");
+    }
+  } catch (e) {
+    logger.error('[db migrate] templates organization columns', e);
+    throw e;
+  }
+}
+ensureTemplatesOrganizationColumns();
+
 /** 待办与提醒 */
 function ensureTodosTable() {
   try {
@@ -319,6 +337,168 @@ function ensureChatSessionsTables() {
   }
 }
 ensureChatSessionsTables();
+
+/** 对话会话扩展：记录首轮使用的人格 / Skill 快照，便于历史复现 */
+function ensureChatSessionsExtraColumns() {
+  try {
+    const cols = db.prepare('PRAGMA table_info(chat_sessions)').all();
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has('persona_id')) {
+      db.exec('ALTER TABLE chat_sessions ADD COLUMN persona_id TEXT DEFAULT ""');
+    }
+    if (!names.has('persona_label')) {
+      db.exec('ALTER TABLE chat_sessions ADD COLUMN persona_label TEXT DEFAULT ""');
+    }
+    if (!names.has('persona_emoji')) {
+      db.exec('ALTER TABLE chat_sessions ADD COLUMN persona_emoji TEXT DEFAULT ""');
+    }
+    if (!names.has('skill_id')) {
+      db.exec('ALTER TABLE chat_sessions ADD COLUMN skill_id TEXT DEFAULT ""');
+    }
+    if (!names.has('skill_name')) {
+      db.exec('ALTER TABLE chat_sessions ADD COLUMN skill_name TEXT DEFAULT ""');
+    }
+  } catch (e) {
+    logger.error('[db migrate] chat_sessions extra columns', e);
+    throw e;
+  }
+}
+ensureChatSessionsExtraColumns();
+
+/** 模板填充历史：每次 AI 填充完成后保留变量、上下文与生成文件，支持回溯复用 */
+function ensureTemplateFillRecordsTable() {
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS template_fill_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        template_id INTEGER,
+        user_email TEXT NOT NULL,
+        template_name TEXT NOT NULL DEFAULT '',
+        variables_json TEXT NOT NULL DEFAULT '{}',
+        context_json TEXT NOT NULL DEFAULT '{}',
+        filled_filename TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (template_id) REFERENCES templates(id) ON DELETE SET NULL
+      );
+    `);
+    db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_template_fill_records_user_time ON template_fill_records (user_email, created_at DESC);',
+    );
+  } catch (e) {
+    logger.error('[db migrate] template_fill_records', e);
+    throw e;
+  }
+}
+ensureTemplateFillRecordsTable();
+
+function buildFallbackChatTitle(text) {
+  const title = String(text || '')
+    .replace(/[#*_`>\[\]{}()]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 48);
+  return title || '新对话';
+}
+
+function sanitizeGeneratedChatTitle(text, fallback) {
+  const raw = String(text || '')
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/[「」“”\"'`#*_>]/g, '')
+    .replace(/^标题[:：]\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const first = raw.split(/[\r\n。！？!?]/).find(Boolean) || raw;
+  const title = first.slice(0, 28).trim();
+  return title || fallback || '新对话';
+}
+
+async function generateChatTitleFromFirstTurn(userText, assistantText) {
+  const fallback = buildFallbackChatTitle(userText);
+  const modelConfig = rowToModelConfig(getBestEnabledModelConfig());
+  if (!modelConfig) {
+    return fallback;
+  }
+  try {
+    const data = await postChatCompletion(modelConfig, {
+      model: normalizeModelId(modelConfig.model_name),
+      messages: [
+        {
+          role: 'system',
+          content: '你是对话标题生成器。请用中文给这轮对话生成一个简洁标题，8到18个汉字，不要引号、不要句号、不要解释。',
+        },
+        {
+          role: 'user',
+          content: `用户第一问：${String(userText || '').slice(0, 1200)}\n\n助手首答摘要：${String(assistantText || '').slice(0, 1200)}`,
+        },
+      ],
+      temperature: 0.1,
+    });
+    return sanitizeGeneratedChatTitle(extractTextFromResponse(data), fallback);
+  } catch (error) {
+    logger.warn('[chat/title] fallback', error?.message || error);
+    return fallback;
+  }
+}
+
+function sanitizeTemplateTags(raw) {
+  const input = Array.isArray(raw)
+    ? raw
+    : typeof raw === 'string'
+      ? (() => {
+          try {
+            const parsed = JSON.parse(raw);
+            return Array.isArray(parsed) ? parsed : raw.split(/[，,;；\s]+/);
+          } catch {
+            return raw.split(/[，,;；\s]+/);
+          }
+        })()
+      : [];
+  return Array.from(
+    new Set(
+      input
+        .map((x) => String(x || '').trim().slice(0, 40))
+        .filter(Boolean)
+        .slice(0, 12),
+    ),
+  );
+}
+
+function parseTemplateTagsJson(raw) {
+  try {
+    return sanitizeTemplateTags(JSON.parse(String(raw || '[]')));
+  } catch {
+    return [];
+  }
+}
+
+function scheduleChatTodoExtraction({ userEmail, userMessage, assistantMessage, sessionId }) {
+  const ue = String(userEmail || '').trim();
+  const u = String(userMessage || '').trim().slice(0, 12000);
+  const a = String(assistantMessage || '').trim().slice(0, 16000);
+  if (!ue || !u || !a) {
+    return;
+  }
+  setImmediate(() => {
+    void (async () => {
+      try {
+        let modelConfig = rowToModelConfig(getBestEnabledModelConfig());
+        if (!modelConfig) {
+          modelConfig = fallbackEnvModelConfig();
+        }
+        if (!modelConfig) {
+          logger.warn('[chat/todos-auto] skipped: no model config');
+          return;
+        }
+        const combined = `【用户】\n${u}\n\n【助手】\n${a}`;
+        const items = await extractTodosJson(modelConfig, combined, new Date().toISOString());
+        const inserted = insertTodoRows(db, ue, items, 'chat');
+        logger.info('[chat/todos-auto]', { userEmail: ue, sessionId: sessionId || null, inserted });
+      } catch (error) {
+        logger.error('[chat/todos-auto]', error);
+      }
+    })();
+  });
+}
 
 function incrementUserConversationTurns(userEmail) {
   const ue = String(userEmail || '').trim();
@@ -2024,7 +2204,8 @@ app.get('/api/chat/sessions', (req, res) => {
     }
     const rows = db
       .prepare(
-        `SELECT id, title, created_at AS createdAt, updated_at AS updatedAt
+        `SELECT id, title, persona_id AS personaId, persona_label AS personaLabel, persona_emoji AS personaEmoji,
+                skill_id AS skillId, skill_name AS skillName, created_at AS createdAt, updated_at AS updatedAt
          FROM chat_sessions WHERE user_email = ? ORDER BY datetime(updated_at) DESC LIMIT 200`,
       )
       .all(email);
@@ -2042,14 +2223,23 @@ app.post('/api/chat/sessions', (req, res) => {
       return res.status(400).json({ success: false, message: '需要 email' });
     }
     const title = String(req.body?.title || '新对话').trim().slice(0, 200) || '新对话';
+    const personaId = String(req.body?.personaId || '').trim().slice(0, 64);
+    const personaLabel = String(req.body?.personaLabel || '').trim().slice(0, 80);
+    const personaEmoji = String(req.body?.personaEmoji || '').trim().slice(0, 8);
+    const skillId = req.body?.skillId != null ? String(req.body.skillId).trim().slice(0, 64) : '';
+    const skillName = String(req.body?.skillName || '').trim().slice(0, 120);
     const info = db
       .prepare(
-        `INSERT INTO chat_sessions (user_email, title, created_at, updated_at)
-         VALUES (?, ?, datetime('now'), datetime('now'))`,
+        `INSERT INTO chat_sessions (user_email, title, persona_id, persona_label, persona_emoji, skill_id, skill_name, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
       )
-      .run(email, title);
+      .run(email, title, personaId, personaLabel, personaEmoji, skillId, skillName);
     const row = db
-      .prepare('SELECT id, title, created_at AS createdAt, updated_at AS updatedAt FROM chat_sessions WHERE id = ?')
+      .prepare(
+        `SELECT id, title, persona_id AS personaId, persona_label AS personaLabel, persona_emoji AS personaEmoji,
+                skill_id AS skillId, skill_name AS skillName, created_at AS createdAt, updated_at AS updatedAt
+         FROM chat_sessions WHERE id = ?`,
+      )
       .get(info.lastInsertRowid);
     res.json({ success: true, session: row });
   } catch (error) {
@@ -2126,7 +2316,7 @@ app.get('/api/chat/sessions/:id/messages', (req, res) => {
   }
 });
 
-app.post('/api/chat/sessions/:id/append-turn', (req, res) => {
+app.post('/api/chat/sessions/:id/append-turn', async (req, res) => {
   try {
     const email = String(req.body?.email || '').trim();
     if (!email) {
@@ -2136,12 +2326,14 @@ app.post('/api/chat/sessions/:id/append-turn', (req, res) => {
     if (!Number.isFinite(id)) {
       return res.status(400).json({ success: false, message: '无效会话 ID' });
     }
-    const sess = db.prepare('SELECT id, title FROM chat_sessions WHERE id = ? AND user_email = ?').get(id, email);
+    const sess = db.prepare('SELECT id, title, persona_id, skill_id FROM chat_sessions WHERE id = ? AND user_email = ?').get(id, email);
     if (!sess) {
       return res.status(404).json({ success: false, message: '会话不存在或无权写入' });
     }
     const userText = String(req.body?.userText || '').trim().slice(0, 24000);
     const assistant = req.body?.assistant && typeof req.body.assistant === 'object' ? req.body.assistant : {};
+    const sessionMeta = req.body?.sessionMeta && typeof req.body.sessionMeta === 'object' ? req.body.sessionMeta : {};
+    const chatMode = String(req.body?.chatMode || sessionMeta.chatMode || '').trim().toLowerCase();
     const aContentRaw = String(assistant.content ?? '').trim().slice(0, 64000);
     const aContent = aContentRaw || '（本轮暂无可见正文）';
     if (!userText) {
@@ -2166,10 +2358,28 @@ app.post('/api/chat/sessions/:id/append-turn', (req, res) => {
     ).run(id, aContent, extraStr, base + 1);
     let newTitle = String(sess.title || '').trim();
     if (!newTitle || newTitle === '新对话') {
-      newTitle = userText.replace(/\s+/g, ' ').slice(0, 48) || '新对话';
+      newTitle = await generateChatTitleFromFirstTurn(userText, aContent);
     }
-    db.prepare(`UPDATE chat_sessions SET title = ?, updated_at = datetime('now') WHERE id = ?`).run(newTitle, id);
-    res.json({ success: true, title: newTitle });
+    const personaId = String(sessionMeta.personaId || '').trim().slice(0, 64);
+    const personaLabel = String(sessionMeta.personaLabel || '').trim().slice(0, 80);
+    const personaEmoji = String(sessionMeta.personaEmoji || '').trim().slice(0, 8);
+    const skillId = sessionMeta.skillId != null ? String(sessionMeta.skillId).trim().slice(0, 64) : '';
+    const skillName = String(sessionMeta.skillName || '').trim().slice(0, 120);
+    db.prepare(
+      `UPDATE chat_sessions
+       SET title = ?,
+           persona_id = CASE WHEN COALESCE(persona_id, '') = '' THEN ? ELSE persona_id END,
+           persona_label = CASE WHEN COALESCE(persona_label, '') = '' THEN ? ELSE persona_label END,
+           persona_emoji = CASE WHEN COALESCE(persona_emoji, '') = '' THEN ? ELSE persona_emoji END,
+           skill_id = CASE WHEN COALESCE(skill_id, '') = '' THEN ? ELSE skill_id END,
+           skill_name = CASE WHEN COALESCE(skill_name, '') = '' THEN ? ELSE skill_name END,
+           updated_at = datetime('now')
+       WHERE id = ?`,
+    ).run(newTitle, personaId, personaLabel, personaEmoji, skillId, skillName, id);
+    if (chatMode !== 'companion') {
+      scheduleChatTodoExtraction({ userEmail: email, userMessage: userText, assistantMessage: aContent, sessionId: id });
+    }
+    res.json({ success: true, title: newTitle, todosExtractionQueued: chatMode !== 'companion' });
   } catch (error) {
     logger.error('[chat/append-turn]', error);
     res.status(500).json({ success: false, message: String(error?.message || error || '保存失败') });
@@ -2430,8 +2640,8 @@ app.post('/api/templates/upload', upload.single('file'), (req, res) => {
     }
 
     const ue = String(req.body?.userEmail || '').trim() || null;
-    const stmt = db.prepare('INSERT INTO templates (filename, original_name, user_email) VALUES (?, ?, ?)');
-    const info = stmt.run(req.file.filename, req.file.originalname, ue);
+    const stmt = db.prepare('INSERT INTO templates (filename, original_name, user_email, folder_path, tags_json) VALUES (?, ?, ?, ?, ?)');
+    const info = stmt.run(req.file.filename, req.file.originalname, ue, '', '[]');
 
     res.json({
       success: true,
@@ -2448,6 +2658,38 @@ app.post('/api/templates/upload', upload.single('file'), (req, res) => {
   }
 });
 
+app.post('/api/templates/upload-folder', upload.array('files', 200), (req, res) => {
+  try {
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (files.length === 0) {
+      return res.status(400).json({ success: false, message: '未接收到模板文件夹中的 .docx 文件' });
+    }
+    const ue = String(req.body?.userEmail || '').trim() || null;
+    const insertStmt = db.prepare('INSERT INTO templates (filename, original_name, user_email, folder_path, tags_json) VALUES (?, ?, ?, ?, ?)');
+    const items = [];
+    for (const file of files) {
+      const relativePath = String(file.originalname || file.filename || 'template.docx').replace(/\\/g, '/');
+      const parts = relativePath.split('/').filter(Boolean);
+      const displayName = parts.pop() || path.basename(relativePath || 'template.docx');
+      const folderPath = parts.join('/').slice(0, 500);
+      const info = insertStmt.run(file.filename, displayName, ue, folderPath, '[]');
+      items.push({
+        id: Number(info.lastInsertRowid),
+        filename: file.filename,
+        originalName: displayName,
+        folderPath,
+        tags: [],
+        user_email: ue,
+      });
+    }
+    logger.info('[templates/upload-folder]', { userEmail: ue, count: items.length });
+    res.json({ success: true, items, count: items.length });
+  } catch (error) {
+    logger.error('[template upload-folder] failed', error);
+    res.status(500).json({ success: false, message: '模板文件夹上传失败' });
+  }
+});
+
 /** 当前用户的 Word 模板列表（不含「模板市场」占位） */
 app.get('/api/templates/my', (req, res) => {
   try {
@@ -2457,9 +2699,12 @@ app.get('/api/templates/my', (req, res) => {
     }
     const rows = db
       .prepare(
-        'SELECT id, original_name AS originalName, uploaded_at AS uploadedAt FROM templates WHERE user_email = ? ORDER BY id DESC LIMIT 200',
+        `SELECT id, original_name AS originalName, folder_path AS folderPath, tags_json AS tagsJson,
+                uploaded_at AS uploadedAt
+         FROM templates WHERE user_email = ? ORDER BY folder_path ASC, id DESC LIMIT 200`,
       )
-      .all(email);
+      .all(email)
+      .map((row) => ({ ...row, tags: parseTemplateTagsJson(row.tagsJson) }));
     res.json({ success: true, items: rows });
   } catch (error) {
     logger.error('[templates/my]', error);
@@ -2501,6 +2746,8 @@ app.put('/api/templates/:id', (req, res) => {
   try {
     const email = String(req.body?.email || '').trim();
     const originalName = String(req.body?.original_name || '').trim().slice(0, 240);
+    const folderPath = String(req.body?.folder_path ?? req.body?.folderPath ?? '').trim().replace(/\\/g, '/').slice(0, 500);
+    const tags = sanitizeTemplateTags(req.body?.tags ?? req.body?.tags_json ?? req.body?.tagsJson ?? []);
     if (!email || !originalName) {
       return res.status(400).json({ success: false, message: '需要 email 与 original_name' });
     }
@@ -2512,7 +2759,7 @@ app.put('/api/templates/:id', (req, res) => {
     if (!row || String(row.user_email || '') !== email) {
       return res.status(403).json({ success: false, message: '无权修改该模板' });
     }
-    db.prepare('UPDATE templates SET original_name = ? WHERE id = ?').run(originalName, id);
+    db.prepare('UPDATE templates SET original_name = ?, folder_path = ?, tags_json = ? WHERE id = ?').run(originalName, folderPath, JSON.stringify(tags), id);
     res.json({ success: true });
   } catch (error) {
     logger.error('[templates PUT]', error);
@@ -2547,6 +2794,59 @@ app.delete('/api/templates/:id', (req, res) => {
   } catch (error) {
     logger.error('[templates DELETE]', error);
     res.status(500).json({ success: false, message: '删除失败' });
+  }
+});
+
+app.get('/api/templates/fill-records', (req, res) => {
+  try {
+    const email = String(req.query.email || '').trim();
+    if (!email) {
+      return res.status(400).json({ success: false, message: '需要 email' });
+    }
+    const limit = Math.min(100, Math.max(1, Number.parseInt(String(req.query.limit || '30'), 10) || 30));
+    const rows = db
+      .prepare(
+        `SELECT id, template_id AS templateId, template_name AS templateName, variables_json AS variablesJson,
+                context_json AS contextJson, created_at AS createdAt
+         FROM template_fill_records
+         WHERE user_email = ?
+         ORDER BY datetime(created_at) DESC, id DESC
+         LIMIT ?`,
+      )
+      .all(email, limit)
+      .map((row) => ({
+        ...row,
+        variables: (() => {
+          try { return JSON.parse(row.variablesJson || '{}'); } catch { return {}; }
+        })(),
+      }));
+    res.json({ success: true, items: rows });
+  } catch (error) {
+    logger.error('[templates/fill-records GET]', error);
+    res.status(500).json({ success: false, message: '读取模板生成历史失败' });
+  }
+});
+
+app.get('/api/templates/fill-records/:id/file', (req, res) => {
+  try {
+    const email = String(req.query.email || '').trim();
+    const id = Number.parseInt(String(req.params.id || ''), 10);
+    if (!email || !Number.isFinite(id)) {
+      return res.status(400).json({ success: false, message: '参数无效' });
+    }
+    const row = db.prepare('SELECT * FROM template_fill_records WHERE id = ? AND user_email = ?').get(id, email);
+    if (!row) {
+      return res.status(404).json({ success: false, message: '历史记录不存在或无权访问' });
+    }
+    const filePath = path.join(uploadsDir, row.filled_filename);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ success: false, message: '历史文件缺失' });
+    }
+    const dlName = `${String(row.template_name || 'filled-template').replace(/\.[^.]+$/i, '').replace(/[^\w.\-\u4e00-\u9fff]+/g, '_') || 'filled-template'}-已填充.docx`;
+    res.download(filePath, dlName);
+  } catch (error) {
+    logger.error('[templates/fill-records/file]', error);
+    res.status(500).json({ success: false, message: '下载历史文件失败' });
   }
 });
 
@@ -2648,18 +2948,80 @@ function extractTemplateVariables(text) {
     return [];
   }
 
-  const regex = /\{([^}]+)\}/g;
   const found = new Set();
-  let match;
-
-  while ((match = regex.exec(text)) !== null) {
-    const value = match[1]?.trim();
-    if (value) {
+  const normalized = String(text || '');
+  const addName = (raw) => {
+    const value = String(raw || '')
+      .replace(/[{}]/g, '')
+      .trim();
+    if (value && value.length <= 120 && !/[\r\n]/.test(value)) {
       found.add(value);
     }
+  };
+
+  // 需求标准：半角双花括号 {{变量名}}
+  const doubleRegex = /\{\{\s*([^{}]+?)\s*\}\}/g;
+  let match;
+  while ((match = doubleRegex.exec(normalized)) !== null) {
+    addName(match[1]);
+  }
+
+  // 兼容历史模板：单花括号 {变量名}，但排除 JSON/大段文本导致的误识别。
+  const singleRegex = /(?<!\{)\{\s*([^{}]+?)\s*\}(?!\})/g;
+  while ((match = singleRegex.exec(normalized)) !== null) {
+    addName(match[1]);
   }
 
   return Array.from(found);
+}
+
+function normalizeDocxTemplateBuffer(buffer) {
+  const zip = new PizZip(buffer);
+  const files = ['word/document.xml'];
+  const rels = zip.file(/word\/(header|footer)\d+\.xml/);
+  for (const f of rels) {
+    files.push(f.name);
+  }
+  for (const name of files) {
+    const file = zip.file(name);
+    if (!file) {
+      continue;
+    }
+    const xml = file.asText();
+    const normalized = xml.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_m, key) => `{${String(key).trim()}}`);
+    if (normalized !== xml) {
+      zip.file(name, normalized);
+    }
+  }
+  return zip.generate({ type: 'nodebuffer' });
+}
+
+function persistTemplateFillRecord({ templateId, userEmail, templateName, variables, context, filledDocxBase64 }) {
+  const ue = String(userEmail || '').trim();
+  if (!ue || !filledDocxBase64) {
+    return null;
+  }
+  const safeBase = String(templateName || 'filled-template')
+    .replace(/\.[^.]+$/i, '')
+    .replace(/[^\w\u4e00-\u9fff\-]+/g, '_')
+    .slice(0, 80) || 'filled-template';
+  const filledFilename = `${Date.now()}-${crypto.randomUUID()}-${safeBase}.docx`;
+  const abs = path.join(uploadsDir, filledFilename);
+  fs.writeFileSync(abs, Buffer.from(String(filledDocxBase64), 'base64'));
+  const info = db
+    .prepare(
+      `INSERT INTO template_fill_records (template_id, user_email, template_name, variables_json, context_json, filled_filename)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      Number.isFinite(Number(templateId)) ? Number(templateId) : null,
+      ue,
+      String(templateName || '').slice(0, 240),
+      JSON.stringify(variables || {}),
+      JSON.stringify(context || {}),
+      filledFilename,
+    );
+  return Number(info.lastInsertRowid);
 }
 
 function buildFillPrompt(text, variables, context) {
@@ -2765,12 +3127,13 @@ function parseVariableResponse(text) {
 }
 
 function buildFilledDocxBase64(buffer, values) {
-  const zip = new PizZip(buffer);
+  const normalizedBuffer = normalizeDocxTemplateBuffer(buffer);
+  const zip = new PizZip(normalizedBuffer);
   const doc = new Docxtemplater(zip, {
     paragraphLoop: true,
     linebreaks: true,
     delimiters: { start: '{', end: '}' },
-    nullGetter: (part) => `{${part.value}}`,
+    nullGetter: (part) => `{{${part.value}}}`,
   });
 
   doc.render(values);
@@ -2823,7 +3186,8 @@ app.post('/api/templates/fill-stream', async (req, res) => {
       return res.end();
     }
 
-    const buffer = await fs.promises.readFile(filePath);
+    const originalBuffer = await fs.promises.readFile(filePath);
+    const buffer = normalizeDocxTemplateBuffer(originalBuffer);
     const { value: rawText } = await mammoth.extractRawText({ buffer });
     const variables = extractTemplateVariables(rawText);
 
@@ -2913,7 +3277,22 @@ app.post('/api/templates/fill-stream', async (req, res) => {
       res.write(`event: variable\ndata: ${JSON.stringify(payload)}\n\n`);
     }
 
-    res.write(`event: done\ndata: ${JSON.stringify({})}\n\n`);
+    let recordId = null;
+    try {
+      const finalDocx = buildFilledDocxBase64(buffer, currentValues);
+      recordId = persistTemplateFillRecord({
+        templateId,
+        userEmail: reqUe,
+        templateName: template.original_name,
+        variables: currentValues,
+        context,
+        filledDocxBase64: finalDocx,
+      });
+    } catch (recordErr) {
+      logger.error('[template fill] persist record failed', recordErr);
+    }
+
+    res.write(`event: done\ndata: ${JSON.stringify({ recordId })}\n\n`);
     res.end();
   } catch (error) {
     logger.error('[template fill] failed', error);

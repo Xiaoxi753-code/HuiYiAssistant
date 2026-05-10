@@ -53,6 +53,8 @@ const fillError = ref('')
 const currentFile = ref(null)
 const templateArrayBuffer = ref(null)
 const lastWordBlob = ref(null)
+const templateFillRecords = ref([])
+const templateFolderUploading = ref(false)
 let fillAbortController = null
 let syncTimer = null
 
@@ -267,10 +269,26 @@ function resolvePersonaPayloadForChat() {
     return { personaId: 'workplace_helper' }
 }
 
+function resolveChatSessionMeta(chatMode = 'default') {
+    const payload = resolvePersonaPayloadForChat()
+    const builtin = BUILTIN_CHAT_PERSONAS.find((p) => p.id === payload.personaId)
+    const custom = chatCustomPersonas.value.find((p) => p.id === payload.personaId)
+    return {
+        chatMode,
+        personaId: payload.personaId || 'workplace_helper',
+        personaLabel: payload.personaLabel || builtin?.title || custom?.name || '职场助手',
+        personaEmoji: payload.personaEmoji || builtin?.emoji || custom?.emoji || '💼',
+        ...(activeChatSkill.value?.id
+            ? { skillId: activeChatSkill.value.id, skillName: activeChatSkill.value.name || '' }
+            : {}),
+    }
+}
+
 async function syncDashboardData() {
     await loadDashboardStats()
     await loadMyTemplates()
-    ElMessage.success('已刷新统计与模板列表')
+    await loadTemplateFillRecords()
+    ElMessage.success('已刷新统计、模板列表与生成历史')
 }
 
 async function loadDashboardStats() {
@@ -815,6 +833,7 @@ watch(
         void loadDashboardStats()
         void loadTodosUpcoming()
         void loadMyTemplates()
+        void loadTemplateFillRecords()
         void loadChatSessions()
         void loadTodoPendingCount()
     },
@@ -1153,6 +1172,7 @@ watch(currentTab, (tab) => {
     }
     if (tab === 'templates') {
         void loadMyTemplates()
+        void loadTemplateFillRecords()
     }
 })
 
@@ -1354,6 +1374,76 @@ async function loadMyTemplates() {
     }
 }
 
+async function loadTemplateFillRecords() {
+    const email = userStore.user?.email
+    if (!email) {
+        templateFillRecords.value = []
+        return
+    }
+    try {
+        const r = await fetch(`/api/templates/fill-records?email=${encodeURIComponent(email)}&limit=8`)
+        const d = await r.json().catch(() => ({}))
+        if (r.ok && d.success) {
+            templateFillRecords.value = d.items || []
+        }
+    } catch {
+        templateFillRecords.value = []
+    }
+}
+
+function downloadTemplateRecord(row) {
+    const email = userStore.user?.email
+    if (!email || !row?.id) {
+        ElMessage.warning('请先登录')
+        return
+    }
+    window.open(`/api/templates/fill-records/${row.id}/file?email=${encodeURIComponent(email)}`, '_blank')
+}
+
+async function applyTemplateRecordVariables(row) {
+    if (!currentFile.value || !Array.isArray(extractedVariables.value) || extractedVariables.value.length === 0) {
+        ElMessage.warning('请先打开对应模板，再复用历史变量')
+        return
+    }
+    const variables = row?.variables && typeof row.variables === 'object' ? row.variables : {}
+    Object.entries(variables).forEach(([name, value]) => updateVariableValue(name, String(value ?? '')))
+    await syncToWord({ render: true })
+    ElMessage.success('已复用该次生成的变量')
+}
+
+async function editTemplateOrganization(row) {
+    const email = userStore.user?.email
+    if (!email || !row?.id) {
+        ElMessage.warning('请先登录')
+        return
+    }
+    try {
+        const { value: folder } = await ElMessageBox.prompt('文件夹路径（可用 / 分层，例如：合同/采购）', '整理模板', {
+            inputValue: row.folderPath || '',
+        })
+        const { value: tagsInput } = await ElMessageBox.prompt('标签（用逗号分隔）', '模板标签', {
+            inputValue: Array.isArray(row.tags) ? row.tags.join(', ') : '',
+        })
+        const tags = String(tagsInput || '').split(/[，,;；\s]+/).map((x) => x.trim()).filter(Boolean)
+        const name = row.originalName || row.original_name || 'template.docx'
+        const r = await fetch(`/api/templates/${row.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, original_name: name, folder_path: String(folder || '').trim(), tags }),
+        })
+        const d = await r.json().catch(() => ({}))
+        if (!r.ok || !d.success) {
+            throw new Error(d.message || `HTTP ${r.status}`)
+        }
+        ElMessage.success('模板整理信息已更新')
+        void loadMyTemplates()
+    } catch (e) {
+        if (e !== 'cancel') {
+            ElMessage.error(String(e?.message || e || '整理失败'))
+        }
+    }
+}
+
 async function deleteMyTemplate(row) {
     const email = userStore.user?.email
     if (!email || !row?.id) {
@@ -1397,7 +1487,7 @@ async function renameMyTemplate(row) {
         const r = await fetch(`/api/templates/${row.id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, original_name: name }),
+            body: JSON.stringify({ email, original_name: name, folder_path: row.folderPath || '', tags: row.tags || [] }),
         })
         const d = await r.json().catch(() => ({}))
         if (!r.ok || !d.success) {
@@ -2335,7 +2425,7 @@ async function ensureChatSessionBeforeSend() {
         const r = await fetch('/api/chat/sessions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, title: '新对话' }),
+            body: JSON.stringify({ email, title: '新对话', ...resolveChatSessionMeta('default') }),
         })
         const d = await r.json().catch(() => ({}))
         if (r.ok && d.success && d.session?.id) {
@@ -2369,6 +2459,8 @@ async function persistChatTurnToServer(userText, assistantMsg) {
                     isHtml: !!assistantMsg.isHtml,
                     streamFailed: !!assistantMsg.streamFailed,
                 },
+                chatMode: 'default',
+                sessionMeta: resolveChatSessionMeta('default'),
             }),
         })
         void loadChatSessions()
@@ -2390,6 +2482,15 @@ async function selectChatSession(sessionId) {
             throw new Error(d.message || `HTTP ${r.status}`)
         }
         currentChatSessionId.value = sessionId
+        const sessionMeta = chatSessions.value.find((s) => s.id === sessionId)
+        if (sessionMeta?.personaId) {
+            chatActivePersonaId.value = sessionMeta.personaId
+        }
+        if (sessionMeta?.skillId) {
+            activeChatSkill.value = { id: Number(sessionMeta.skillId) || sessionMeta.skillId, name: sessionMeta.skillName || '历史 Skill' }
+        } else {
+            activeChatSkill.value = null
+        }
         const items = d.items || []
         if (items.length === 0) {
             chatMessages.value = getInitialChatMessages()
@@ -2397,7 +2498,6 @@ async function selectChatSession(sessionId) {
             chatMessages.value = items.map(mapDbRowToChatMessage)
         }
         chatLoadedPaperLabel.value = ''
-        activeChatSkill.value = null
         await nextTick()
         scheduleScrollChatToBottom(false)
     } catch (e) {
@@ -2415,7 +2515,7 @@ async function createNewChatSession() {
         const r = await fetch('/api/chat/sessions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, title: '新对话' }),
+            body: JSON.stringify({ email, title: '新对话', ...resolveChatSessionMeta('default') }),
         })
         const d = await r.json().catch(() => ({}))
         if (!r.ok || !d.success || !d.session?.id) {
@@ -2737,22 +2837,6 @@ async function sendChatMessage(overrideText, options = {}) {
                     })
                     const rd = await rec.json().catch(() => ({}))
                     void loadDashboardStats()
-                    if (!isCompanion && userStore.user?.email && prev.content && last.content) {
-                        void fetch('/api/todos/extract-from-chat', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                userEmail: userStore.user.email,
-                                userMessage: prev.content,
-                                assistantMessage: last.content,
-                            }),
-                        })
-                            .then(() => {
-                                void loadTodosUpcoming()
-                                void loadTodoPendingCount()
-                            })
-                            .catch(() => {})
-                    }
                     if (!isCompanion && rec.ok && rd.hintPulse) {
                         impressionUpdating.value = true
                         setTimeout(() => {
@@ -3413,17 +3497,34 @@ async function buildAgentContextForChat() {
     return ctx
 }
 
+function normalizeTemplateZipForDoubleBraces(zip) {
+    const files = ['word/document.xml']
+    zip.file(/word\/(header|footer)\d+\.xml/).forEach((file) => files.push(file.name))
+    files.forEach((name) => {
+        const file = zip.file(name)
+        if (!file) {
+            return
+        }
+        const xml = file.asText()
+        const normalized = xml.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_m, key) => `{${String(key).trim()}}`)
+        if (normalized !== xml) {
+            zip.file(name, normalized)
+        }
+    })
+}
+
 async function syncToWord({ render = true } = {}) {
     if (!templateArrayBuffer.value) {
         return
     }
 
     const zip = new PizZip(templateArrayBuffer.value)
+    normalizeTemplateZipForDoubleBraces(zip)
     const doc = new Docxtemplater(zip, {
         paragraphLoop: true,
         linebreaks: true,
         delimiters: { start: '{', end: '}' },
-        nullGetter: (part) => `{${part.value}}`,
+        nullGetter: (part) => `{{${part.value}}}`,
     })
 
     doc.render(buildTemplateValues())
@@ -3457,15 +3558,21 @@ function extractVariablesFromText(text) {
         return []
     }
 
-    const regex = /\{([^}]+)\}/g
     const found = new Set()
-    let match
-
-    while ((match = regex.exec(text)) !== null) {
-        const value = match[1]?.trim()
-        if (value) {
+    const addName = (raw) => {
+        const value = String(raw || '').replace(/[{}]/g, '').trim()
+        if (value && value.length <= 120 && !/[\r\n]/.test(value)) {
             found.add(value)
         }
+    }
+    let match
+    const doubleRegex = /\{\{\s*([^{}]+?)\s*\}\}/g
+    while ((match = doubleRegex.exec(text)) !== null) {
+        addName(match[1])
+    }
+    const singleRegex = /(?<!\{)\{\s*([^{}]+?)\s*\}(?!\})/g
+    while ((match = singleRegex.exec(text)) !== null) {
+        addName(match[1])
     }
 
     return Array.from(found)
@@ -3675,6 +3782,45 @@ async function uploadTemplateFile(file) {
     }
 
     return response.json()
+}
+
+async function uploadTemplateFolderFiles(files) {
+    const docxFiles = Array.from(files || []).filter((file) => String(file.name || '').toLowerCase().endsWith('.docx'))
+    if (docxFiles.length === 0) {
+        ElMessage.warning('文件夹中没有可上传的 .docx 模板')
+        return
+    }
+    const formData = new FormData()
+    docxFiles.forEach((file) => {
+        formData.append('files', file, file.webkitRelativePath || file.name)
+    })
+    const em = userStore.user?.email
+    if (em) {
+        formData.append('userEmail', em)
+    }
+    templateFolderUploading.value = true
+    try {
+        const response = await fetch('/api/templates/upload-folder', {
+            method: 'POST',
+            body: formData,
+        })
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok || !data.success) {
+            throw new Error(data.message || `HTTP ${response.status}`)
+        }
+        ElMessage.success(`已导入 ${data.count || docxFiles.length} 个模板`)
+        void loadMyTemplates()
+    } catch (error) {
+        ElMessage.error(String(error?.message || error || '文件夹导入失败'))
+    } finally {
+        templateFolderUploading.value = false
+    }
+}
+
+async function handleFolderUpload(event) {
+    const files = event.target.files
+    await uploadTemplateFolderFiles(files)
+    event.target.value = ''
 }
 
 async function handleFileUpload(event) {
@@ -3974,6 +4120,9 @@ async function handleExportWord() {
                                 @click="selectChatSession(s.id)"
                             >
                                 <span class="chat-history-title">{{ s.title || '未命名' }}</span>
+                                <span v-if="s.personaLabel || s.skillName" class="chat-history-meta">
+                                    {{ s.personaEmoji || '💬' }} {{ s.personaLabel || '默认身份' }}<template v-if="s.skillName"> · ⚡ {{ s.skillName }}</template>
+                                </span>
                                 <button
                                     type="button"
                                     class="chat-history-delete"
@@ -4261,14 +4410,30 @@ async function handleExportWord() {
                                 aria-label="上传 Word 模板文件"
                                 @change="handleFileUpload"
                             />
+                            <input
+                                id="templates-folder-upload"
+                                type="file"
+                                accept=".docx"
+                                multiple
+                                webkitdirectory
+                                directory
+                                class="word-upload-input word-upload-input--folder"
+                                aria-label="上传模板文件夹"
+                                @change="handleFolderUpload"
+                            />
                             <div class="word-upload-hint">
                                 <span class="word-upload-icon">&#8679;</span>
                                 <div>
                                     <div style="font-weight:600;">点击或拖拽上传 .docx 文件</div>
-                                    <div style="font-size:0.75rem;color:var(--text-muted);">最大 20MB，上传后自动渲染预览</div>
+                                    <div style="font-size:0.75rem;color:var(--text-muted);">单文件最大 20MB；也可导入模板文件夹，自动入库</div>
                                 </div>
                             </div>
                         </div>
+                    </div>
+                    <div class="template-folder-actions">
+                        <label class="btn btn-outline btn-sm" for="templates-folder-upload">
+                            {{ templateFolderUploading ? '导入中…' : '上传文件夹作为模板库' }}
+                        </label>
                     </div>
                     <div v-if="isPreviewLoading" class="word-upload-status">正在渲染预览，请稍候…</div>
                     <div v-if="previewError" class="word-upload-error">{{ previewError }}</div>
@@ -4315,7 +4480,7 @@ async function handleExportWord() {
                         <h4 class="template-syntax-title">占位符怎么用（真实生效规则）</h4>
                         <ul class="template-syntax-list">
                             <li v-pre>
-                                在 Word 正文里用<strong>半角单花括号</strong>写变量名，例如 <code>{报告主题}</code>、<code>{汇报人}</code>。引擎（Docxtemplater）按花括号内的变量名识别槽位；说明文档里常见的双花括号写法如 <code>{{报告主题}}</code> 表示同一种占位——在 .docx 里请写成单花括号 <code>{报告主题}</code>。
+                                在 Word 正文里优先用<strong>半角双花括号</strong>写变量名，例如 <code>{{报告主题}}</code>、<code>{{汇报人}}</code>。系统会自动识别并在渲染前转换为 Docxtemplater 可填充槽位；历史单花括号 <code>{报告主题}</code> 仍兼容。
                             </li>
                             <li>
                                 上传模板后，右侧面板会列出识别到的变量。点击「AI 自动填充」时，模型按上下文填入；也可手动改每条变量再导出。
@@ -4337,11 +4502,33 @@ async function handleExportWord() {
                         <ul v-else class="my-templates-list">
                             <li v-for="row in myTemplates" :key="row.id" class="my-templates-row">
                                 <span class="my-templates-name" :title="row.originalName">{{ row.originalName }}</span>
-                                <span class="my-templates-meta">{{ row.uploadedAt || row.uploaded_at }}</span>
+                                <span class="my-templates-meta">
+                                    <span v-if="row.folderPath">📁 {{ row.folderPath }} · </span>{{ row.uploadedAt || row.uploaded_at }}
+                                    <template v-if="row.tags?.length"> · {{ row.tags.join(' / ') }}</template>
+                                </span>
                                 <div class="my-templates-actions">
                                     <button type="button" class="btn btn-outline btn-xs" @click="openMyTemplate(row)">打开</button>
                                     <button type="button" class="btn btn-outline btn-xs" @click="renameMyTemplate(row)">重命名</button>
+                                    <button type="button" class="btn btn-outline btn-xs" @click="editTemplateOrganization(row)">整理</button>
                                     <button type="button" class="btn btn-ghost btn-xs" @click="deleteMyTemplate(row)">删除</button>
+                                </div>
+                            </li>
+                        </ul>
+                    </div>
+                    <div v-if="!currentFile" class="my-templates-panel template-history-panel">
+                        <div class="my-templates-head">
+                            <h4>生成历史</h4>
+                            <span class="my-templates-hint">自动保存最近 8 次填充结果</span>
+                        </div>
+                        <div v-if="!userStore.user?.email" class="my-templates-empty">登录后可回溯已生成的模板记录。</div>
+                        <ul v-else-if="templateFillRecords.length === 0" class="my-templates-empty">暂无生成历史。完成一次 AI 自动填充后会自动存档。</ul>
+                        <ul v-else class="my-templates-list">
+                            <li v-for="row in templateFillRecords" :key="row.id" class="my-templates-row">
+                                <span class="my-templates-name" :title="row.templateName">{{ row.templateName || '未命名模板' }}</span>
+                                <span class="my-templates-meta">{{ row.createdAt }}</span>
+                                <div class="my-templates-actions">
+                                    <button type="button" class="btn btn-outline btn-xs" @click="applyTemplateRecordVariables(row)">复用变量</button>
+                                    <button type="button" class="btn btn-outline btn-xs" @click="downloadTemplateRecord(row)">下载</button>
                                 </div>
                             </li>
                         </ul>
@@ -5595,6 +5782,20 @@ async function handleExportWord() {
     border-radius: 4px;
 }
 
+.template-folder-actions {
+    display: flex;
+    justify-content: center;
+    margin: 0.75rem 0 0.25rem;
+}
+
+.template-history-panel {
+    margin-top: 1rem;
+}
+
+.word-upload-input--folder {
+    display: none;
+}
+
 .my-templates-panel {
     margin-top: 16px;
     padding: 14px 16px;
@@ -6658,8 +6859,9 @@ async function handleExportWord() {
 .chat-history-item {
     position: relative;
     display: flex;
-    align-items: center;
-    gap: 6px;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
     padding: 10px 32px 10px 10px;
     border-radius: 10px;
     cursor: pointer;
@@ -6678,11 +6880,20 @@ async function handleExportWord() {
 }
 
 .chat-history-title {
+    width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    flex: 1;
     min-width: 0;
+}
+
+.chat-history-meta {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.68rem;
+    color: #64748b;
 }
 
 .chat-history-delete {
