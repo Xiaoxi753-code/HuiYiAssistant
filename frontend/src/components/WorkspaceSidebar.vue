@@ -115,6 +115,9 @@ async function confirmDemoPresentationReset() {
       <button type="button" class="nav-item" :class="{ active: isDashTab('templates') }" @click="goDashboardTab('templates')">
         <span class="nav-item-icon-text">&#9638;</span> <span>智能模板引擎</span><span class="nav-badge hot">HOT</span>
       </button>
+      <button type="button" class="nav-item" :class="{ active: isDashTab('library') }" @click="goDashboardTab('library')">
+        <span class="nav-item-icon-text">&#128193;</span> <span>个人资料库</span>
+      </button>
       <button type="button" class="nav-item" :class="{ active: isDashTab('meeting') }" @click="goDashboardTab('meeting')">
         <span class="nav-item-icon-text">&#9679;</span> <span>智能会议纪要</span>
       </button>

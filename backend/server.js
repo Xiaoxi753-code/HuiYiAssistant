@@ -281,6 +281,38 @@ function ensureTemplatesOrganizationColumns() {
 }
 ensureTemplatesOrganizationColumns();
 
+
+/** 个人资料库：集中归档用户上传的文档、会议纪要与可复用资料 */
+function ensureKnowledgeItemsTable() {
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS knowledge_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_email TEXT NOT NULL,
+        title TEXT NOT NULL,
+        item_type TEXT NOT NULL DEFAULT 'document',
+        source_kind TEXT NOT NULL DEFAULT 'manual_upload',
+        original_name TEXT NOT NULL DEFAULT '',
+        stored_filename TEXT NOT NULL DEFAULT '',
+        mime_type TEXT NOT NULL DEFAULT '',
+        folder_path TEXT NOT NULL DEFAULT '',
+        tags_json TEXT NOT NULL DEFAULT '[]',
+        content_text TEXT NOT NULL DEFAULT '',
+        summary_text TEXT NOT NULL DEFAULT '',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_knowledge_items_user_time ON knowledge_items (user_email, created_at DESC);');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_knowledge_items_user_folder ON knowledge_items (user_email, folder_path, item_type);');
+  } catch (e) {
+    logger.error('[db migrate] knowledge_items', e);
+    throw e;
+  }
+}
+ensureKnowledgeItemsTable();
+
 /** 待办与提醒 */
 function ensureTodosTable() {
   try {
@@ -469,6 +501,94 @@ function parseTemplateTagsJson(raw) {
   } catch {
     return [];
   }
+}
+
+
+function sanitizeLibraryFolderPath(raw) {
+  return String(raw || '')
+    .replace(/\\/g, '/')
+    .split('/')
+    .map((part) => part.trim().replace(/[<>:"|?*]+/g, '').slice(0, 80))
+    .filter(Boolean)
+    .join('/')
+    .slice(0, 500);
+}
+
+function parseJsonObjectSafe(raw, fallback = {}) {
+  try {
+    const v = JSON.parse(String(raw || ''));
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function parseLibraryRow(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    itemType: row.item_type,
+    sourceKind: row.source_kind,
+    originalName: row.original_name,
+    storedFilename: row.stored_filename,
+    mimeType: row.mime_type,
+    folderPath: row.folder_path,
+    tags: parseTemplateTagsJson(row.tags_json),
+    contentText: row.content_text,
+    summaryText: row.summary_text,
+    metadata: parseJsonObjectSafe(row.metadata_json, {}),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    canDownload: !!row.stored_filename,
+  };
+}
+
+function inferKnowledgeFolder(item) {
+  const text = `${item.title || ''} ${item.originalName || ''} ${item.summaryText || ''} ${item.contentText || ''}`.toLowerCase();
+  if (item.itemType === 'meeting' || /会议|纪要|meeting|transcript/.test(text)) return '会议纪要';
+  if (/论文|文献|paper|article|研究|摘要|pdf/.test(text)) return '文献资料';
+  if (/合同|协议|法务|采购/.test(text)) return '合同法务';
+  if (/周报|日报|月报|汇报|复盘/.test(text)) return '工作汇报';
+  if (/需求|产品|prd|原型/.test(text)) return '产品资料';
+  return '待整理';
+}
+
+function insertKnowledgeItem(input) {
+  const userEmail = String(input.userEmail || '').trim();
+  if (!userEmail) return null;
+  const title = String(input.title || input.originalName || '未命名资料').trim().slice(0, 240) || '未命名资料';
+  const info = db
+    .prepare(
+      `INSERT INTO knowledge_items
+       (user_email, title, item_type, source_kind, original_name, stored_filename, mime_type, folder_path, tags_json, content_text, summary_text, metadata_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      userEmail,
+      title,
+      String(input.itemType || 'document').slice(0, 40),
+      String(input.sourceKind || 'manual_upload').slice(0, 60),
+      String(input.originalName || '').slice(0, 260),
+      String(input.storedFilename || '').replace(/\\/g, '/').slice(0, 600),
+      String(input.mimeType || '').slice(0, 120),
+      sanitizeLibraryFolderPath(input.folderPath || ''),
+      JSON.stringify(sanitizeTemplateTags(input.tags || [])),
+      String(input.contentText || '').slice(0, 120000),
+      String(input.summaryText || '').slice(0, 120000),
+      JSON.stringify(input.metadata && typeof input.metadata === 'object' ? input.metadata : {}),
+    );
+  return Number(info.lastInsertRowid);
+}
+
+function resolveKnowledgeStoredFile(storedFilename) {
+  const rel = String(storedFilename || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!rel) return '';
+  const abs = path.resolve(uploadsDir, rel);
+  const root = path.resolve(uploadsDir);
+  if (abs !== root && !abs.startsWith(root + path.sep)) {
+    return '';
+  }
+  return abs;
 }
 
 function scheduleChatTodoExtraction({ userEmail, userMessage, assistantMessage, sessionId }) {
@@ -1015,6 +1135,20 @@ const paperUpload = multer({
     cb(new Error('仅支持 .pdf 或 .docx'));
   },
   limits: { fileSize: 25 * 1024 * 1024 },
+});
+
+
+const libraryUpload = multer({
+  storage,
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    if (['.pdf', '.docx', '.txt', '.md'].includes(ext)) {
+      cb(null, true);
+      return;
+    }
+    cb(new Error('资料库仅支持 .pdf、.docx、.txt、.md'));
+  },
+  limits: { fileSize: 30 * 1024 * 1024 },
 });
 
 const meetingAudioUploadDir = path.join(uploadsDir, 'audio');
@@ -1772,8 +1906,21 @@ app.post(
         text = text.slice(0, PAPER_PARSE_RETURN_MAX_CHARS);
       }
       const ue = String(req.body?.userEmail || '').trim();
+      let libraryItemId = null;
       if (ue) {
         incrementUserPapersProcessed(ue);
+        libraryItemId = insertKnowledgeItem({
+          userEmail: ue,
+          title: path.basename(req.file.originalname || '文献资料', ext),
+          itemType: 'document',
+          sourceKind: 'paper_upload',
+          originalName: req.file.originalname || '',
+          storedFilename: req.file.filename || '',
+          mimeType: req.file.mimetype || '',
+          folderPath: '文献资料',
+          contentText: text,
+          metadata: { charCount: fullLen, truncated, mimeKind: ext === '.pdf' ? 'pdf' : 'docx' },
+        });
       }
       return res.json({
         success: true,
@@ -1782,6 +1929,7 @@ app.post(
         truncated,
         filename: req.file.originalname || '',
         mimeKind: ext === '.pdf' ? 'pdf' : 'docx',
+        libraryItemId,
       });
     } catch (err) {
       logger.error('[papers/parse-file]', err);
@@ -1791,7 +1939,8 @@ app.post(
       }
     } finally {
       try {
-        if (diskPath && fs.existsSync(diskPath)) {
+        const ue = String(req.body?.userEmail || '').trim();
+        if (!ue && diskPath && fs.existsSync(diskPath)) {
           await fs.promises.unlink(diskPath);
         }
       } catch {
@@ -1901,13 +2050,236 @@ app.post('/api/papers/summarize', async (req, res) => {
       });
     }
     const summary = await summarizePaper(modelCfg, { text: bodyText, title: String(title || '') });
-    return res.json({ success: true, summary });
+    const userEmail = String(req.body?.userEmail || '').trim();
+    let libraryItemId = null;
+    if (userEmail) {
+      libraryItemId = insertKnowledgeItem({
+        userEmail,
+        title: `${String(title || '').trim() || '文献摘要'} · 摘要`,
+        itemType: 'summary',
+        sourceKind: 'paper_summary',
+        originalName: String(title || '').trim(),
+        folderPath: '文献资料/摘要',
+        contentText: bodyText.slice(0, 20000),
+        summaryText: JSON.stringify(summary, null, 2),
+        metadata: { title: String(title || '').trim() },
+      });
+    }
+    return res.json({ success: true, summary, libraryItemId });
   } catch (err) {
     logger.error('[papers/summarize]', err);
     const msg = String(err?.message || err || '摘要生成失败');
     if (!res.headersSent) {
       res.status(500).json({ success: false, message: msg, error: msg });
     }
+  }
+});
+
+
+// —— 个人资料库：模板复用 + 文件资料归档 ——
+app.get('/api/library/items', (req, res) => {
+  try {
+    const email = String(req.query.email || '').trim();
+    if (!email) {
+      return res.status(400).json({ success: false, message: '需要 email' });
+    }
+    const type = String(req.query.type || '').trim();
+    const q = String(req.query.q || '').trim().toLowerCase();
+    const args = [email];
+    let where = 'WHERE user_email = ?';
+    if (type) {
+      where += ' AND item_type = ?';
+      args.push(type);
+    }
+    const rows = db
+      .prepare(
+        `SELECT * FROM knowledge_items ${where}
+         ORDER BY folder_path ASC, datetime(updated_at) DESC, id DESC LIMIT 500`,
+      )
+      .all(...args)
+      .map(parseLibraryRow)
+      .filter((row) => !q || `${row.title} ${row.originalName} ${row.folderPath} ${row.tags.join(' ')}`.toLowerCase().includes(q));
+    res.json({ success: true, items: rows });
+  } catch (error) {
+    logger.error('[library/items GET]', error);
+    res.status(500).json({ success: false, message: '读取资料库失败' });
+  }
+});
+
+app.post('/api/library/upload', libraryUpload.single('file'), async (req, res) => {
+  try {
+    const userEmail = String(req.body?.userEmail || '').trim();
+    if (!userEmail) {
+      return res.status(400).json({ success: false, message: '需要登录后上传资料' });
+    }
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: '未接收到文件' });
+    }
+    const ext = path.extname(req.file.originalname || '').toLowerCase();
+    let contentText = '';
+    if (ext === '.pdf' || ext === '.docx') {
+      try {
+        contentText = (await extractPaperTextFromPath(getMulterAbsPath(req.file), ext)).slice(0, 120000);
+      } catch (e) {
+        logger.warn('[library/upload] extract failed', e?.message || e);
+      }
+    } else if (ext === '.txt' || ext === '.md') {
+      try {
+        contentText = (await fs.promises.readFile(getMulterAbsPath(req.file), 'utf8')).slice(0, 120000);
+      } catch (e) {
+        logger.warn('[library/upload] text read failed', e?.message || e);
+      }
+    }
+    const id = insertKnowledgeItem({
+      userEmail,
+      title: path.basename(req.file.originalname || '资料', ext),
+      itemType: 'document',
+      sourceKind: 'manual_upload',
+      originalName: req.file.originalname || '',
+      storedFilename: req.file.filename || '',
+      mimeType: req.file.mimetype || '',
+      folderPath: sanitizeLibraryFolderPath(req.body?.folderPath || '手动上传'),
+      tags: req.body?.tags ? String(req.body.tags).split(/[，,;；\s]+/) : [],
+      contentText,
+      metadata: { size: req.file.size || 0, ext },
+    });
+    const row = db.prepare('SELECT * FROM knowledge_items WHERE id = ?').get(id);
+    res.json({ success: true, item: parseLibraryRow(row) });
+  } catch (error) {
+    logger.error('[library/upload POST]', error);
+    res.status(500).json({ success: false, message: '资料上传失败' });
+  }
+});
+
+app.put('/api/library/items/:id', (req, res) => {
+  try {
+    const email = String(req.body?.email || '').trim();
+    const id = Number.parseInt(String(req.params.id || ''), 10);
+    if (!email || !Number.isFinite(id)) {
+      return res.status(400).json({ success: false, message: '参数无效' });
+    }
+    const row = db.prepare('SELECT * FROM knowledge_items WHERE id = ? AND user_email = ?').get(id, email);
+    if (!row) {
+      return res.status(404).json({ success: false, message: '资料不存在或无权访问' });
+    }
+    const title = String(req.body?.title ?? row.title).trim().slice(0, 240) || row.title;
+    const folderPath = sanitizeLibraryFolderPath(req.body?.folderPath ?? req.body?.folder_path ?? row.folder_path);
+    const tags = sanitizeTemplateTags(req.body?.tags ?? row.tags_json);
+    db.prepare('UPDATE knowledge_items SET title = ?, folder_path = ?, tags_json = ?, updated_at = datetime(\'now\') WHERE id = ?').run(
+      title,
+      folderPath,
+      JSON.stringify(tags),
+      id,
+    );
+    const next = db.prepare('SELECT * FROM knowledge_items WHERE id = ?').get(id);
+    res.json({ success: true, item: parseLibraryRow(next) });
+  } catch (error) {
+    logger.error('[library/items PUT]', error);
+    res.status(500).json({ success: false, message: '资料整理失败' });
+  }
+});
+
+app.delete('/api/library/items/:id', (req, res) => {
+  try {
+    const email = String(req.query.email || '').trim();
+    const id = Number.parseInt(String(req.params.id || ''), 10);
+    if (!email || !Number.isFinite(id)) {
+      return res.status(400).json({ success: false, message: '参数无效' });
+    }
+    const row = db.prepare('SELECT * FROM knowledge_items WHERE id = ? AND user_email = ?').get(id, email);
+    if (!row) {
+      return res.status(404).json({ success: false, message: '资料不存在或无权访问' });
+    }
+    const filePath = resolveKnowledgeStoredFile(row.stored_filename);
+    if (filePath && fs.existsSync(filePath)) {
+      try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+    }
+    db.prepare('DELETE FROM knowledge_items WHERE id = ?').run(id);
+    res.json({ success: true });
+  } catch (error) {
+    logger.error('[library/items DELETE]', error);
+    res.status(500).json({ success: false, message: '删除资料失败' });
+  }
+});
+
+app.get('/api/library/items/:id/file', (req, res) => {
+  try {
+    const email = String(req.query.email || '').trim();
+    const id = Number.parseInt(String(req.params.id || ''), 10);
+    if (!email || !Number.isFinite(id)) {
+      return res.status(400).json({ success: false, message: '参数无效' });
+    }
+    const row = db.prepare('SELECT * FROM knowledge_items WHERE id = ? AND user_email = ?').get(id, email);
+    if (!row || !row.stored_filename) {
+      return res.status(404).json({ success: false, message: '文件不存在或无权访问' });
+    }
+    const filePath = resolveKnowledgeStoredFile(row.stored_filename);
+    if (!filePath || !fs.existsSync(filePath)) {
+      return res.status(404).json({ success: false, message: '资料文件缺失' });
+    }
+    const dlName = String(row.original_name || row.title || 'openclaw-file').replace(/[^\w.\-\u4e00-\u9fff]+/g, '_');
+    res.download(filePath, dlName || 'openclaw-file');
+  } catch (error) {
+    logger.error('[library/items file]', error);
+    res.status(500).json({ success: false, message: '下载资料失败' });
+  }
+});
+
+app.post('/api/library/agent-organize', async (req, res) => {
+  try {
+    const email = String(req.body?.email || '').trim();
+    if (!email) {
+      return res.status(400).json({ success: false, message: '需要 email' });
+    }
+    const rows = db.prepare('SELECT * FROM knowledge_items WHERE user_email = ? ORDER BY datetime(updated_at) DESC, id DESC LIMIT 200').all(email);
+    if (rows.length === 0) {
+      return res.json({ success: true, updated: 0, items: [] });
+    }
+    const updates = [];
+    const modelConfig = rowToModelConfig(getBestEnabledModelConfig()) || fallbackEnvModelConfig();
+    if (modelConfig) {
+      try {
+        const compact = rows.map((r) => ({ id: r.id, title: r.title, type: r.item_type, source: r.source_kind, folder: r.folder_path, tags: parseTemplateTagsJson(r.tags_json), excerpt: String(r.summary_text || r.content_text || '').slice(0, 500) }));
+        const data = await postChatCompletion(modelConfig, {
+          model: normalizeModelId(modelConfig.model_name),
+          messages: [
+            { role: 'system', content: '你是资料库整理助手。只输出 JSON 数组，每项包含 id、folderPath、tags。folderPath 用中文短路径，可用 / 分层；tags 为最多5个中文标签。不要解释。' },
+            { role: 'user', content: JSON.stringify(compact).slice(0, 30000) },
+          ],
+          temperature: 0.1,
+        });
+        const text = extractTextFromResponse(data).replace(/```json|```/g, '').trim();
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed)) {
+          for (const item of parsed) {
+            const id = Number(item?.id);
+            if (Number.isFinite(id)) {
+              updates.push({ id, folderPath: sanitizeLibraryFolderPath(item.folderPath || item.folder_path || ''), tags: sanitizeTemplateTags(item.tags || []) });
+            }
+          }
+        }
+      } catch (e) {
+        logger.warn('[library/agent-organize] model fallback', e?.message || e);
+      }
+    }
+    if (updates.length === 0) {
+      for (const r of rows) {
+        updates.push({ id: r.id, folderPath: inferKnowledgeFolder(parseLibraryRow(r)), tags: parseTemplateTagsJson(r.tags_json) });
+      }
+    }
+    const stmt = db.prepare('UPDATE knowledge_items SET folder_path = ?, tags_json = ?, updated_at = datetime(\'now\') WHERE id = ? AND user_email = ?');
+    let updated = 0;
+    for (const u of updates) {
+      const folderPath = sanitizeLibraryFolderPath(u.folderPath) || '待整理';
+      const tags = sanitizeTemplateTags(u.tags || []);
+      const info = stmt.run(folderPath, JSON.stringify(tags), u.id, email);
+      updated += Number(info.changes || 0);
+    }
+    const items = db.prepare('SELECT * FROM knowledge_items WHERE user_email = ? ORDER BY folder_path ASC, datetime(updated_at) DESC, id DESC LIMIT 500').all(email).map(parseLibraryRow);
+    res.json({ success: true, updated, items });
+  } catch (error) {
+    logger.error('[library/agent-organize POST]', error);
+    res.status(500).json({ success: false, message: 'Agent 整理失败' });
   }
 });
 
@@ -2000,12 +2372,30 @@ function createMeetingProcessHandler(opts = {}) {
         todosInserted = insertTodoRows(db, userEmail, items, 'meeting');
       }
 
+      let libraryItemId = null;
+      if (userEmail) {
+        libraryItemId = insertKnowledgeItem({
+          userEmail,
+          title: `会议纪要 ${new Date().toLocaleString('zh-CN', { hour12: false })}`,
+          itemType: 'meeting',
+          sourceKind: 'meeting_minutes',
+          originalName: req.file?.originalname || '会议纪要',
+          storedFilename: savedRelative || '',
+          mimeType: req.file?.mimetype || '',
+          folderPath: '会议纪要',
+          contentText: transcript,
+          summaryText: minutesMarkdown,
+          metadata: { todosInserted, hasAudio: !!savedRelative },
+        });
+      }
+
       res.json({
         success: true,
         transcript,
         minutesMarkdown,
         savedAudioPath: savedRelative || null,
         todosInserted,
+        libraryItemId,
       });
     } catch (error) {
       logger.error('[meeting]', error);

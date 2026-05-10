@@ -55,12 +55,19 @@ const templateArrayBuffer = ref(null)
 const lastWordBlob = ref(null)
 const templateFillRecords = ref([])
 const templateFolderUploading = ref(false)
+const libraryActivePane = ref('templates')
+const libraryItems = ref([])
+const libraryLoading = ref(false)
+const libraryUploading = ref(false)
+const librarySearch = ref('')
+const libraryFileInputRef = ref(null)
 let fillAbortController = null
 let syncTimer = null
 
 const tabTitles = {
   overview: '工作台概览',
   templates: '智能模板引擎',
+  library: '个人资料库',
   chat: '对话助手',
   meeting: '智能会议纪要',
   paper: '文献论文摘要',
@@ -681,6 +688,23 @@ const chatInputTextareaRef = ref(null)
 const myTemplates = ref([])
 const myTemplatesLoading = ref(false)
 
+const libraryFilteredItems = computed(() => {
+    const q = String(librarySearch.value || '').trim().toLowerCase()
+    if (!q) {
+        return libraryItems.value
+    }
+    return libraryItems.value.filter((item) => `${item.title || ''} ${item.originalName || ''} ${item.folderPath || ''} ${(item.tags || []).join(' ')}`.toLowerCase().includes(q))
+})
+
+const libraryFolders = computed(() => {
+    const map = new Map()
+    for (const item of libraryItems.value) {
+        const key = item.folderPath || '未分组'
+        map.set(key, (map.get(key) || 0) + 1)
+    }
+    return Array.from(map.entries()).map(([name, count]) => ({ name, count }))
+})
+
 const modelConfigs = ref([])
 const modelConfigsLoading = ref(false)
 const modelConfigsError = ref('')
@@ -834,6 +858,7 @@ watch(
         void loadTodosUpcoming()
         void loadMyTemplates()
         void loadTemplateFillRecords()
+        void loadLibraryItems()
         void loadChatSessions()
         void loadTodoPendingCount()
     },
@@ -1174,6 +1199,11 @@ watch(currentTab, (tab) => {
         void loadMyTemplates()
         void loadTemplateFillRecords()
     }
+    if (tab === 'library') {
+        void loadMyTemplates()
+        void loadTemplateFillRecords(30)
+        void loadLibraryItems()
+    }
 })
 
 /** 对话区滚动容器（主对话 / 陪伴） */
@@ -1374,14 +1404,14 @@ async function loadMyTemplates() {
     }
 }
 
-async function loadTemplateFillRecords() {
+async function loadTemplateFillRecords(limit = 8) {
     const email = userStore.user?.email
     if (!email) {
         templateFillRecords.value = []
         return
     }
     try {
-        const r = await fetch(`/api/templates/fill-records?email=${encodeURIComponent(email)}&limit=8`)
+        const r = await fetch(`/api/templates/fill-records?email=${encodeURIComponent(email)}&limit=${encodeURIComponent(String(limit))}`)
         const d = await r.json().catch(() => ({}))
         if (r.ok && d.success) {
             templateFillRecords.value = d.items || []
@@ -1389,6 +1419,171 @@ async function loadTemplateFillRecords() {
     } catch {
         templateFillRecords.value = []
     }
+}
+
+
+async function loadLibraryItems() {
+    const email = userStore.user?.email
+    if (!email) {
+        libraryItems.value = []
+        return
+    }
+    libraryLoading.value = true
+    try {
+        const r = await fetch(`/api/library/items?email=${encodeURIComponent(email)}`)
+        const d = await r.json().catch(() => ({}))
+        if (!r.ok || !d.success) {
+            throw new Error(d.message || `HTTP ${r.status}`)
+        }
+        libraryItems.value = d.items || []
+    } catch (e) {
+        libraryItems.value = []
+        ElMessage.error(String(e?.message || e || '资料库加载失败'))
+    } finally {
+        libraryLoading.value = false
+    }
+}
+
+function triggerLibraryUpload() {
+    if (!userStore.user?.email) {
+        ElMessage.warning('请先登录后上传资料')
+        return
+    }
+    libraryFileInputRef.value?.click?.()
+}
+
+async function handleLibraryFileUpload(event) {
+    const file = event?.target?.files?.[0]
+    if (!file) {
+        return
+    }
+    const email = userStore.user?.email
+    if (!email) {
+        ElMessage.warning('请先登录')
+        return
+    }
+    libraryUploading.value = true
+    try {
+        const fd = new FormData()
+        fd.append('file', file)
+        fd.append('userEmail', email)
+        fd.append('folderPath', '手动上传')
+        const r = await fetch('/api/library/upload', { method: 'POST', body: fd })
+        const d = await r.json().catch(() => ({}))
+        if (!r.ok || !d.success) {
+            throw new Error(d.message || `HTTP ${r.status}`)
+        }
+        ElMessage.success('资料已上传并入库')
+        void loadLibraryItems()
+    } catch (e) {
+        ElMessage.error(String(e?.message || e || '资料上传失败'))
+    } finally {
+        libraryUploading.value = false
+        if (event?.target) {
+            event.target.value = ''
+        }
+    }
+}
+
+function downloadLibraryItem(row) {
+    const email = userStore.user?.email
+    if (!email || !row?.id) {
+        ElMessage.warning('请先登录')
+        return
+    }
+    if (!row.canDownload) {
+        ElMessage.info('这条记录是文本纪要/摘要，没有原始文件可下载')
+        return
+    }
+    window.open(`/api/library/items/${row.id}/file?email=${encodeURIComponent(email)}`, '_blank')
+}
+
+async function editLibraryItem(row) {
+    const email = userStore.user?.email
+    if (!email || !row?.id) {
+        ElMessage.warning('请先登录')
+        return
+    }
+    try {
+        const { value: folder } = await ElMessageBox.prompt('文件夹路径（可用 / 分层，例如：项目A/会议）', '整理资料', {
+            inputValue: row.folderPath || '',
+        })
+        const { value: tagsInput } = await ElMessageBox.prompt('标签（用逗号分隔）', '资料标签', {
+            inputValue: Array.isArray(row.tags) ? row.tags.join(', ') : '',
+        })
+        const tags = String(tagsInput || '').split(/[，,;；\s]+/).map((x) => x.trim()).filter(Boolean)
+        const r = await fetch(`/api/library/items/${row.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, title: row.title, folderPath: String(folder || '').trim(), tags }),
+        })
+        const d = await r.json().catch(() => ({}))
+        if (!r.ok || !d.success) {
+            throw new Error(d.message || `HTTP ${r.status}`)
+        }
+        ElMessage.success('资料整理信息已更新')
+        void loadLibraryItems()
+    } catch (e) {
+        if (e !== 'cancel') {
+            ElMessage.error(String(e?.message || e || '整理失败'))
+        }
+    }
+}
+
+async function deleteLibraryItem(row) {
+    const email = userStore.user?.email
+    if (!email || !row?.id) {
+        return
+    }
+    try {
+        await ElMessageBox.confirm(`确定删除资料「${row.title || row.originalName || ''}」？`, '删除资料', { type: 'warning' })
+    } catch {
+        return
+    }
+    try {
+        const r = await fetch(`/api/library/items/${row.id}?email=${encodeURIComponent(email)}`, { method: 'DELETE' })
+        const d = await r.json().catch(() => ({}))
+        if (!r.ok || !d.success) {
+            throw new Error(d.message || `HTTP ${r.status}`)
+        }
+        ElMessage.success('已删除资料')
+        void loadLibraryItems()
+    } catch (e) {
+        ElMessage.error(String(e?.message || e || '删除失败'))
+    }
+}
+
+async function agentOrganizeLibrary() {
+    const email = userStore.user?.email
+    if (!email) {
+        ElMessage.warning('请先登录')
+        return
+    }
+    libraryLoading.value = true
+    try {
+        const r = await fetch('/api/library/agent-organize', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email }),
+        })
+        const d = await r.json().catch(() => ({}))
+        if (!r.ok || !d.success) {
+            throw new Error(d.message || `HTTP ${r.status}`)
+        }
+        libraryItems.value = d.items || []
+        ElMessage.success(`Agent 已整理 ${d.updated || 0} 条资料`)
+    } catch (e) {
+        ElMessage.error(String(e?.message || e || 'Agent 整理失败'))
+    } finally {
+        libraryLoading.value = false
+    }
+}
+
+function libraryItemTypeLabel(type) {
+    const t = String(type || '')
+    if (t === 'meeting') return '会议纪要'
+    if (t === 'summary') return '摘要记录'
+    return '文件资料'
 }
 
 function downloadTemplateRecord(row) {
@@ -3070,6 +3265,7 @@ async function runPaperSummarize() {
             body: JSON.stringify({
                 text,
                 title: paperTitle.value.trim(),
+                ...(userStore.user?.email ? { userEmail: userStore.user.email } : {}),
             }),
         })
         let data = {}
@@ -4534,6 +4730,130 @@ async function handleExportWord() {
                         </ul>
                     </div>
                 </div>
+            </div>
+
+
+            <!-- ===== TAB: LIBRARY ===== -->
+            <div v-show="currentTab === 'library'" class="tab-content tab-library" id="tabLibrary">
+                <div class="library-hero">
+                    <div>
+                        <p class="library-kicker">Personal Knowledge Base</p>
+                        <h2>个人资料库</h2>
+                        <p>把「模板库」和「文件资料库」放在一个入口：上次写过的模板结果、上传过的 PDF / Docx、会议纪要都会在这里沉淀，方便复用和继续写作。</p>
+                    </div>
+                    <div class="library-hero-actions">
+                        <button type="button" class="btn btn-outline" @click="goTab('templates')">去模板引擎写文档</button>
+                        <button type="button" class="btn btn-primary" :disabled="libraryLoading" @click="agentOrganizeLibrary">Agent 自动整理</button>
+                    </div>
+                </div>
+
+                <div class="library-tabs" role="tablist" aria-label="资料库类型">
+                    <button type="button" :class="{ active: libraryActivePane === 'templates' }" @click="libraryActivePane = 'templates'">模板库</button>
+                    <button type="button" :class="{ active: libraryActivePane === 'files' }" @click="libraryActivePane = 'files'">文件资料库</button>
+                </div>
+
+                <section v-show="libraryActivePane === 'templates'" class="library-section">
+                    <div class="library-section-head">
+                        <div>
+                            <h3>模板库：复用模板与上次填写结果</h3>
+                            <p>这里展示你上传过的 Word 模板，以及 AI 自动填充后保存的历史记录。写类似材料时，可以先下载上次结果、复用变量，或打开原模板继续生成。</p>
+                        </div>
+                        <button type="button" class="btn btn-outline btn-sm" @click="loadMyTemplates(); loadTemplateFillRecords(30)">刷新</button>
+                    </div>
+                    <div class="library-grid-two">
+                        <div class="library-card-panel">
+                            <div class="library-card-panel-head">
+                                <h4>已上传模板</h4>
+                                <span>{{ myTemplates.length }} 个</span>
+                            </div>
+                            <div v-if="!userStore.user?.email" class="library-empty">登录后可查看你的模板库。</div>
+                            <div v-else-if="myTemplatesLoading" class="library-empty">模板加载中…</div>
+                            <div v-else-if="myTemplates.length === 0" class="library-empty">暂无模板。请到「智能模板引擎」上传 .docx。</div>
+                            <ul v-else class="library-list">
+                                <li v-for="row in myTemplates" :key="row.id" class="library-row">
+                                    <div class="library-row-main">
+                                        <strong>{{ row.originalName }}</strong>
+                                        <span><template v-if="row.folderPath">📁 {{ row.folderPath }} · </template>{{ row.uploadedAt || row.uploaded_at }}</span>
+                                        <em v-if="row.tags?.length">{{ row.tags.join(' / ') }}</em>
+                                    </div>
+                                    <div class="library-row-actions">
+                                        <button type="button" class="btn btn-outline btn-xs" @click="openMyTemplate(row); goTab('templates')">打开</button>
+                                        <button type="button" class="btn btn-outline btn-xs" @click="editTemplateOrganization(row)">整理</button>
+                                        <button type="button" class="btn btn-ghost btn-xs" @click="deleteMyTemplate(row)">删除</button>
+                                    </div>
+                                </li>
+                            </ul>
+                        </div>
+                        <div class="library-card-panel">
+                            <div class="library-card-panel-head">
+                                <h4>填充历史</h4>
+                                <span>{{ templateFillRecords.length }} 条</span>
+                            </div>
+                            <div v-if="!userStore.user?.email" class="library-empty">登录后可回溯生成历史。</div>
+                            <div v-else-if="templateFillRecords.length === 0" class="library-empty">暂无历史。模板 AI 填充完成后会自动存档。</div>
+                            <ul v-else class="library-list">
+                                <li v-for="row in templateFillRecords" :key="row.id" class="library-row">
+                                    <div class="library-row-main">
+                                        <strong>{{ row.templateName || '未命名模板' }}</strong>
+                                        <span>{{ row.createdAt }}</span>
+                                    </div>
+                                    <div class="library-row-actions">
+                                        <button type="button" class="btn btn-outline btn-xs" @click="applyTemplateRecordVariables(row)">复用变量</button>
+                                        <button type="button" class="btn btn-outline btn-xs" @click="downloadTemplateRecord(row)">下载</button>
+                                    </div>
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
+                </section>
+
+                <section v-show="libraryActivePane === 'files'" class="library-section">
+                    <div class="library-section-head">
+                        <div>
+                            <h3>文件资料库：文档、论文与会议纪要</h3>
+                            <p>支持手动上传 PDF / Docx / TXT / MD；文献解析、结构化摘要和会议纪要会自动归档到这里。你可以手动建文件夹，也可以让 Agent 自动归类。</p>
+                        </div>
+                        <div class="library-section-actions">
+                            <input ref="libraryFileInputRef" class="sr-only" type="file" accept=".pdf,.docx,.txt,.md" @change="handleLibraryFileUpload" />
+                            <button type="button" class="btn btn-outline btn-sm" :disabled="libraryUploading" @click="triggerLibraryUpload">上传资料</button>
+                            <button type="button" class="btn btn-primary btn-sm" :disabled="libraryLoading" @click="agentOrganizeLibrary">Agent 整理</button>
+                        </div>
+                    </div>
+                    <div class="library-toolbar">
+                        <label class="sr-only" for="librarySearchInput">搜索资料库</label>
+                        <input id="librarySearchInput" v-model="librarySearch" type="search" placeholder="搜索标题、文件夹或标签…" />
+                        <button type="button" class="btn btn-outline btn-sm" @click="loadLibraryItems">刷新</button>
+                    </div>
+                    <div v-if="libraryFolders.length" class="library-folder-cloud">
+                        <span v-for="f in libraryFolders" :key="f.name">📁 {{ f.name }} <b>{{ f.count }}</b></span>
+                    </div>
+                    <div v-if="!userStore.user?.email" class="library-empty library-empty--wide">登录后可查看个人资料库。</div>
+                    <div v-else-if="libraryLoading" class="library-empty library-empty--wide">资料库加载中…</div>
+                    <div v-else-if="libraryFilteredItems.length === 0" class="library-empty library-empty--wide">暂无资料。上传文件、处理会议纪要或解析文献后会自动出现在这里。</div>
+                    <ul v-else class="library-file-list">
+                        <li v-for="row in libraryFilteredItems" :key="row.id" class="library-file-row">
+                            <div class="library-file-icon">{{ row.itemType === 'meeting' ? '🎙️' : row.itemType === 'summary' ? '📝' : '📄' }}</div>
+                            <div class="library-file-main">
+                                <div class="library-file-title">
+                                    <strong>{{ row.title }}</strong>
+                                    <span>{{ libraryItemTypeLabel(row.itemType) }}</span>
+                                </div>
+                                <p v-if="row.summaryText" class="library-file-excerpt">{{ String(row.summaryText).slice(0, 160) }}</p>
+                                <p v-else-if="row.contentText" class="library-file-excerpt">{{ String(row.contentText).slice(0, 160) }}</p>
+                                <div class="library-file-meta">
+                                    <span>📁 {{ row.folderPath || '未分组' }}</span>
+                                    <span>{{ row.createdAt }}</span>
+                                    <span v-if="row.tags?.length">{{ row.tags.join(' / ') }}</span>
+                                </div>
+                            </div>
+                            <div class="library-row-actions">
+                                <button v-if="row.canDownload" type="button" class="btn btn-outline btn-xs" @click="downloadLibraryItem(row)">下载</button>
+                                <button type="button" class="btn btn-outline btn-xs" @click="editLibraryItem(row)">整理</button>
+                                <button type="button" class="btn btn-ghost btn-xs" @click="deleteLibraryItem(row)">删除</button>
+                            </div>
+                        </li>
+                    </ul>
+                </section>
             </div>
 
             <!-- ===== TAB: MEETING ===== -->
@@ -7624,6 +7944,306 @@ async function handleExportWord() {
     border-radius: 4px;
     background: #f3f4f6;
     color: #374151;
+}
+
+
+/* —— 个人资料库 —— */
+.tab-library {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding-bottom: 48px;
+}
+
+.library-hero {
+    display: flex;
+    justify-content: space-between;
+    gap: 20px;
+    align-items: center;
+    padding: 26px;
+    border: 1px solid #e2e8f0;
+    border-radius: 22px;
+    background: linear-gradient(135deg, #f8fafc 0%, #eefdf8 48%, #fff7ed 100%);
+    box-shadow: 0 18px 50px rgba(15, 23, 42, 0.08);
+}
+
+.library-kicker {
+    margin: 0 0 6px;
+    font-size: 0.75rem;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #0f766e;
+}
+
+.library-hero h2 {
+    margin: 0 0 8px;
+    font-size: 1.8rem;
+    letter-spacing: -0.04em;
+    color: #0f172a;
+}
+
+.library-hero p {
+    max-width: 720px;
+    margin: 0;
+    color: #475569;
+    line-height: 1.65;
+}
+
+.library-hero-actions,
+.library-section-actions,
+.library-row-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.library-tabs {
+    display: inline-flex;
+    gap: 6px;
+    margin: 20px 0 14px;
+    padding: 6px;
+    border: 1px solid #e2e8f0;
+    border-radius: 999px;
+    background: #fff;
+}
+
+.library-tabs button {
+    border: 0;
+    border-radius: 999px;
+    padding: 9px 16px;
+    background: transparent;
+    color: #64748b;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.library-tabs button.active {
+    background: #0f766e;
+    color: #fff;
+    box-shadow: 0 8px 20px rgba(15, 118, 110, 0.18);
+}
+
+.library-section {
+    border: 1px solid #e5e7eb;
+    border-radius: 20px;
+    padding: 20px;
+    background: rgba(255, 255, 255, 0.86);
+}
+
+.library-section-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    align-items: flex-start;
+    margin-bottom: 16px;
+}
+
+.library-section-head h3 {
+    margin: 0 0 6px;
+    color: #0f172a;
+}
+
+.library-section-head p {
+    margin: 0;
+    color: #64748b;
+    line-height: 1.55;
+}
+
+.library-grid-two {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+}
+
+.library-card-panel {
+    border: 1px solid #e2e8f0;
+    border-radius: 16px;
+    background: #fff;
+    overflow: hidden;
+}
+
+.library-card-panel-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+    padding: 14px 16px;
+    border-bottom: 1px solid #edf2f7;
+    background: #f8fafc;
+}
+
+.library-card-panel-head h4 {
+    margin: 0;
+    color: #0f172a;
+}
+
+.library-card-panel-head span,
+.library-empty {
+    color: #64748b;
+    font-size: 0.86rem;
+}
+
+.library-empty {
+    padding: 22px 16px;
+    text-align: center;
+}
+
+.library-empty--wide {
+    border: 1px dashed #cbd5e1;
+    border-radius: 14px;
+    background: #f8fafc;
+}
+
+.library-list,
+.library-file-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.library-row,
+.library-file-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid #f1f5f9;
+}
+
+.library-row:last-child,
+.library-file-row:last-child {
+    border-bottom: 0;
+}
+
+.library-row-main {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.library-row-main strong,
+.library-file-title strong {
+    color: #0f172a;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.library-row-main span,
+.library-file-meta {
+    color: #64748b;
+    font-size: 0.78rem;
+}
+
+.library-row-main em {
+    color: #0f766e;
+    font-size: 0.76rem;
+    font-style: normal;
+}
+
+.library-toolbar {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+.library-toolbar input {
+    flex: 1;
+    min-width: 180px;
+    border: 1px solid #dbe3ef;
+    border-radius: 12px;
+    padding: 10px 12px;
+    outline: none;
+}
+
+.library-folder-cloud {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0 0 14px;
+}
+
+.library-folder-cloud span {
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: #ecfdf5;
+    color: #065f46;
+    font-size: 0.78rem;
+}
+
+.library-folder-cloud b {
+    margin-left: 4px;
+}
+
+.library-file-row {
+    align-items: flex-start;
+    border: 1px solid #e5e7eb;
+    border-radius: 16px;
+    margin-bottom: 10px;
+    background: #fff;
+}
+
+.library-file-icon {
+    width: 42px;
+    height: 42px;
+    border-radius: 14px;
+    display: grid;
+    place-items: center;
+    background: #f1f5f9;
+    flex: 0 0 auto;
+}
+
+.library-file-main {
+    flex: 1;
+    min-width: 0;
+}
+
+.library-file-title {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.library-file-title span {
+    flex: 0 0 auto;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: #eef2ff;
+    color: #4f46e5;
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
+.library-file-excerpt {
+    margin: 0 0 8px;
+    color: #475569;
+    font-size: 0.85rem;
+    line-height: 1.55;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.library-file-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+@media (max-width: 900px) {
+    .library-hero,
+    .library-section-head,
+    .library-row,
+    .library-file-row {
+        flex-direction: column;
+    }
+    .library-grid-two {
+        grid-template-columns: 1fr;
+    }
 }
 
 /* —— 情感陪伴：暖色侧栏 / 主区底 —— */
