@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, nextTick, watch, onBeforeUnmount, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { ElMessage, ElCard, ElButton, ElMessageBox, ElDialog, ElDrawer, ElEmpty, ElButtonGroup } from 'element-plus'
+import { ElMessage, ElCard, ElButton, ElMessageBox, ElDialog, ElDrawer, ElEmpty, ElButtonGroup, ElInput } from 'element-plus'
 import 'element-plus/es/components/message/style/css'
 import 'element-plus/es/components/card/style/css'
 import 'element-plus/es/components/button/style/css'
@@ -9,6 +9,7 @@ import 'element-plus/es/components/message-box/style/css'
 import 'element-plus/es/components/dialog/style/css'
 import 'element-plus/es/components/drawer/style/css'
 import 'element-plus/es/components/empty/style/css'
+import 'element-plus/es/components/input/style/css'
 import { useUserStore } from '../store/user.js'
 import { useOpenclawContextStore } from '../store/openclawContext.js'
 import { renderAsync } from 'docx-preview'
@@ -17,12 +18,92 @@ import PizZip from 'pizzip'
 import { saveAs } from 'file-saver'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
+import * as echarts from 'echarts'
 import MeetingMinutesView from '../components/MeetingMinutesView.vue'
+import { ElIcon } from 'element-plus'
+import 'element-plus/es/components/icon/style/css'
+import {
+    AlarmClock,
+    Briefcase,
+    Calendar,
+    ChatDotRound,
+    ChatLineRound,
+    Comment,
+    Delete,
+    Document,
+    DocumentChecked,
+    EditPen,
+    Folder,
+    Histogram,
+    Key,
+    Lightning,
+    DArrowLeft,
+    DArrowRight,
+    Link,
+    MagicStick,
+    Medal,
+    Menu,
+    Microphone,
+    Pointer,
+    Promotion,
+    Reading,
+    Setting,
+    TrendCharts,
+    UserFilled,
+} from '@element-plus/icons-vue'
 
 marked.setOptions({
     gfm: true,
     breaks: true,
 })
+
+const PURIFY_MD_OPTS = {
+    ADD_TAGS: ['details', 'summary', 'div', 'pre'],
+    ADD_ATTR: ['class', 'open'],
+}
+
+function escapeHtmlForThink(s) {
+    return String(s ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+}
+
+/**
+ * 流式阶段：若最后一个 <think> 尚未闭合，截断到该开标签之前，避免半段标签进 Markdown。
+ * 多段场景中只看「最后一次」开标签是否已配对闭合。
+ */
+function stripIncompleteRedactedThinking(raw) {
+    const s = String(raw ?? '')
+    const openRe = /<redacted_thinking\b[^>]*>/gi
+    let last = null
+    let m
+    while ((m = openRe.exec(s)) !== null) {
+        last = { idx: m.index, len: m[0].length }
+    }
+    if (!last) {
+        return s
+    }
+    const tail = s.slice(last.idx + last.len)
+    if (!/<\/redacted_thinking>/i.test(tail)) {
+        return s.slice(0, last.idx)
+    }
+    return s
+}
+
+function transformRedactedThinkingBlocks(s) {
+    return String(s).replace(/<redacted_thinking\b[^>]*>([\s\S]*?)<\/redacted_thinking>/gi, (_full, inner) => {
+        const body = escapeHtmlForThink(inner)
+        return `\n\n<details class="deep-think-box"><summary>深度思考过程</summary><div class="think-content"><pre class="think-pre">${body}</pre></div></details>\n\n`
+    })
+}
+
+function preprocessAssistantMarkdownSource(text) {
+    let s = stripIncompleteRedactedThinking(String(text ?? ''))
+    s = transformRedactedThinkingBlocks(s)
+    return s
+}
 
 /** 助手正文 Markdown → 安全 HTML（流式过程中多次调用，失败时回退转义） */
 function renderMarkdown(text) {
@@ -30,10 +111,11 @@ function renderMarkdown(text) {
         return ''
     }
     try {
-        const rawHtml = marked.parse(String(text))
-        return DOMPurify.sanitize(rawHtml)
+        const src = preprocessAssistantMarkdownSource(text)
+        const rawHtml = marked.parse(src)
+        return DOMPurify.sanitize(rawHtml, PURIFY_MD_OPTS)
     } catch {
-        return DOMPurify.sanitize(String(text))
+        return DOMPurify.sanitize(escapeHtmlForThink(String(text)))
     }
 }
 
@@ -61,6 +143,8 @@ const libraryLoading = ref(false)
 const libraryUploading = ref(false)
 const librarySearch = ref('')
 const libraryFileInputRef = ref(null)
+const libraryRenamingId = ref(null)
+const libraryRenameDraft = ref('')
 let fillAbortController = null
 let syncTimer = null
 
@@ -92,6 +176,93 @@ const dashboardStats = ref({
     skills_count: 0,
 })
 
+/** 工作台：点赞/评分折线图 */
+const ratingsTrendLoading = ref(false)
+const ratingsTrendData = ref([])
+const ratingsTrendChartRef = ref(null)
+let ratingsChartInstance = null
+
+function disposeRatingsChart() {
+    if (ratingsChartInstance) {
+        try {
+            ratingsChartInstance.dispose()
+        } catch {
+            /* ignore */
+        }
+        ratingsChartInstance = null
+    }
+}
+
+function mountRatingsChart() {
+    disposeRatingsChart()
+    const el = ratingsTrendChartRef.value
+    if (!el || !ratingsTrendData.value.length) {
+        return
+    }
+    ratingsChartInstance = echarts.init(el)
+    const items = ratingsTrendData.value
+    const dates = items.map((x) => x.date)
+    const counts = items.map((x) => Number(x.count || 0))
+    ratingsChartInstance.setOption({
+        animationDuration: 320,
+        grid: { left: 34, right: 8, top: 20, bottom: 28 },
+        tooltip: { trigger: 'axis' },
+        xAxis: {
+            type: 'category',
+            boundaryGap: false,
+            data: dates,
+            axisLabel: { fontSize: 10, color: '#64748b', rotate: dates.length > 12 ? 32 : 0 },
+        },
+        yAxis: {
+            type: 'value',
+            minInterval: 1,
+            splitLine: { lineStyle: { color: 'rgba(148,163,184,0.35)' } },
+            axisLabel: { fontSize: 10, color: '#64748b' },
+        },
+        series: [
+            {
+                name: '点赞/评分',
+                type: 'line',
+                smooth: true,
+                showSymbol: dates.length <= 20,
+                areaStyle: { color: 'rgba(124, 58, 237, 0.12)' },
+                lineStyle: { width: 2.4, color: '#7c3aed' },
+                itemStyle: { color: '#7c3aed' },
+                data: counts,
+            },
+        ],
+    })
+}
+
+function onRatingsChartResize() {
+    if (ratingsChartInstance) {
+        try {
+            ratingsChartInstance.resize()
+        } catch {
+            /* ignore */
+        }
+    }
+}
+
+async function loadRatingsTrend() {
+    ratingsTrendLoading.value = true
+    try {
+        const r = await fetch('/api/ratings/trend?days=90')
+        const d = await r.json().catch(() => ({}))
+        if (r.ok && d.success && Array.isArray(d.items)) {
+            ratingsTrendData.value = d.items
+        } else {
+            ratingsTrendData.value = []
+        }
+    } catch {
+        ratingsTrendData.value = []
+    } finally {
+        ratingsTrendLoading.value = false
+    }
+    await nextTick()
+    mountRatingsChart()
+}
+
 const companionSettings = ref({
     persona: 'default',
     address: '',
@@ -101,11 +272,11 @@ const companionSettings = ref({
 /** 主对话工作台身份（与「情感陪伴」人格分离）：personaId 随 /api/chat 上报，服务端写入 system */
 const CHAT_PERSONA_STORAGE_KEY = 'openclaw_chat_persona_v1'
 const BUILTIN_CHAT_PERSONAS = [
-    { id: 'meeting_assistant', title: '会议助理', emoji: '📋', desc: '干练结构化，议程与行动项优先' },
-    { id: 'strict_mentor', title: '严厉导师', emoji: '🎓', desc: '高标准反馈，先风险后步骤' },
-    { id: 'geek_blaze', title: '爆裂极客', emoji: '⚡', desc: '快节奏技术梗，结论必须落地' },
-    { id: 'workplace_helper', title: '职场助手', emoji: '💼', desc: '商务礼貌，结论先行' },
-    { id: 'caring_partner', title: '知心大姐', emoji: '💬', desc: '先共情再建议，短句柔和' },
+    { id: 'meeting_assistant', title: '会议助理', iconComponent: Calendar, desc: '干练结构化，议程与行动项优先' },
+    { id: 'strict_mentor', title: '严厉导师', iconComponent: Medal, desc: '高标准反馈，先风险后步骤' },
+    { id: 'geek_blaze', title: '爆裂极客', iconComponent: Lightning, desc: '快节奏技术梗，结论必须落地' },
+    { id: 'workplace_helper', title: '职场助手', iconComponent: Briefcase, desc: '商务礼貌，结论先行' },
+    { id: 'caring_partner', title: '知心大姐', iconComponent: ChatDotRound, desc: '先共情再建议，短句柔和' },
 ]
 
 const chatActivePersonaId = ref('workplace_helper')
@@ -113,7 +284,7 @@ const chatCustomPersonas = ref([])
 const customPersonaDialogOpen = ref(false)
 const customPersonaForm = ref({
     name: '',
-    emoji: '🙂',
+    emoji: '',
     systemPrompt: '',
 })
 
@@ -213,13 +384,13 @@ function selectWorkbenchPersona(id) {
 }
 
 function openCustomPersonaDialog() {
-    customPersonaForm.value = { name: '', emoji: '🙂', systemPrompt: '' }
+    customPersonaForm.value = { name: '', emoji: '', systemPrompt: '' }
     customPersonaDialogOpen.value = true
 }
 
 async function submitCustomPersona() {
     const name = String(customPersonaForm.value.name || '').trim().slice(0, 80)
-    const emoji = String(customPersonaForm.value.emoji || '').trim().slice(0, 8) || '🙂'
+    const emoji = String(customPersonaForm.value.emoji || '').trim().slice(0, 2) || (name ? name.charAt(0) : '自')
     const systemPrompt = String(customPersonaForm.value.systemPrompt || '').trim().slice(0, 2500)
     if (!name) {
         ElMessage.warning('请填写伙伴名称')
@@ -285,15 +456,31 @@ function resolveChatSessionMeta(chatMode = 'default') {
         chatMode,
         personaId: payload.personaId || 'workplace_helper',
         personaLabel: payload.personaLabel || builtin?.title || custom?.name || '职场助手',
-        personaEmoji: payload.personaEmoji || builtin?.emoji || custom?.emoji || '💼',
+        personaEmoji: String(payload.personaEmoji || custom?.emoji || '').trim().slice(0, 8) || '',
         ...(activeChatSkill.value?.id
             ? { skillId: activeChatSkill.value.id, skillName: activeChatSkill.value.name || '' }
             : {}),
     }
 }
 
+/** 会话列表左侧：按 personaId 选择 Element Plus 图标（不依赖历史 emoji 字段） */
+function chatSessionPersonaIcon(session) {
+    const id = String(session?.personaId || '').trim()
+    if (id) {
+        const b = BUILTIN_CHAT_PERSONAS.find((p) => p.id === id)
+        if (b?.iconComponent) {
+            return b.iconComponent
+        }
+        if (id.startsWith('custom_')) {
+            return UserFilled
+        }
+    }
+    return Briefcase
+}
+
 async function syncDashboardData() {
     await loadDashboardStats()
+    await loadRatingsTrend()
     await loadMyTemplates()
     await loadTemplateFillRecords()
     await fetchWebhookConfigs()
@@ -548,8 +735,93 @@ const TODO_ALERT_STORAGE_KEY = 'openclaw_todo_alerted_v1'
 let todoPollTimer = null
 const dueTodoAlerts = ref([])
 const dueTodoAlertVisible = ref(false)
-const reminderForm = ref({ title: '', remindAt: '', notes: '' })
+const reminderForm = ref({
+    title: '',
+    remindAt: '',
+    notes: '',
+    repeatMode: 'once',
+    repeatCustomDays: /** @type {number[]} */ ([]),
+})
+const todoSnoozingId = ref(null)
 const reminderSaving = ref(false)
+
+const WEEKDAY_CHECKBOXES = [
+    { value: 1, label: '周一' },
+    { value: 2, label: '周二' },
+    { value: 3, label: '周三' },
+    { value: 4, label: '周四' },
+    { value: 5, label: '周五' },
+    { value: 6, label: '周六' },
+    { value: 7, label: '周日' },
+]
+
+const remindersBoardTodos = ref([])
+const remindersBoardLoading = ref(false)
+const remindersBoardTab = ref('pending')
+
+const reminderTimeEditOpen = ref(false)
+const reminderTimeEditRow = ref(null)
+const reminderTimeEditDraft = ref('')
+const reminderTimeEditSaving = ref(false)
+
+function todoDrawerBucket(t) {
+    if (Number(t.done) === 1) {
+        return 2
+    }
+    const st = String(t.status || 'pending').toLowerCase()
+    if (st === 'notified') {
+        return 1
+    }
+    return 0
+}
+
+const sortedTodosDrawerList = computed(() => {
+    const arr = [...todosDrawerList.value]
+    arr.sort((a, b) => {
+        const ba = todoDrawerBucket(a)
+        const bb = todoDrawerBucket(b)
+        if (ba !== bb) {
+            return ba - bb
+        }
+        const ta = Date.parse(a.remindAt) || 0
+        const tb = Date.parse(b.remindAt) || 0
+        if (ba === 0) {
+            return ta - tb
+        }
+        return tb - ta
+    })
+    return arr
+})
+
+function hasTodoBeenPushed(t) {
+    const st = String(t.status || '').toLowerCase()
+    if (st === 'notified') {
+        return true
+    }
+    const w = String(t.pushedWecomAt || '').trim()
+    const f = String(t.pushedFeishuAt || '').trim()
+    return !!(w || f)
+}
+
+function sortRemindersForBoard(list, mode) {
+    const arr = [...list]
+    arr.sort((a, b) => {
+        const ta = Date.parse(a.remindAt) || 0
+        const tb = Date.parse(b.remindAt) || 0
+        return mode === 'pending' ? ta - tb : tb - ta
+    })
+    return arr
+}
+
+const remindersPendingBoard = computed(() => {
+    const list = remindersBoardTodos.value.filter((t) => Number(t.done) === 0 && !hasTodoBeenPushed(t))
+    return sortRemindersForBoard(list, 'pending')
+})
+
+const remindersPushedBoard = computed(() => {
+    const list = remindersBoardTodos.value.filter((t) => hasTodoBeenPushed(t))
+    return sortRemindersForBoard(list, 'pushed')
+})
 
 /** 沉浸页悬浮待办铃铛：拖拽、边界、localStorage 记忆 */
 const OPENCLAW_BELL_POSITION_KEY = 'openclaw_bell_position'
@@ -691,6 +963,86 @@ const currentChatSessionId = ref(null)
 const chatHistoryOverlayOpen = ref(false)
 const chatInputTextareaRef = ref(null)
 
+const CHAT_HISTORY_W_KEY = 'huiyi_chat_history_width_px'
+const CHAT_HISTORY_C_KEY = 'huiyi_chat_history_collapsed'
+const chatHistoryWidthPx = ref(260)
+const chatHistoryCollapsed = ref(false)
+const chatLayoutIsNarrow = ref(false)
+
+let chatHistoryResizeActive = false
+let chatHistoryResizeStartX = 0
+let chatHistoryResizeStartW = 260
+
+function updateChatLayoutNarrow() {
+    if (typeof window === 'undefined') {
+        return
+    }
+    chatLayoutIsNarrow.value = window.innerWidth <= 900
+}
+
+function onChatHistoryResizeMouseMove(e) {
+    if (!chatHistoryResizeActive || chatHistoryCollapsed.value || chatLayoutIsNarrow.value) {
+        return
+    }
+    const delta = e.clientX - chatHistoryResizeStartX
+    const nw = Math.min(420, Math.max(200, chatHistoryResizeStartW + delta))
+    chatHistoryWidthPx.value = nw
+}
+
+function onChatHistoryResizeMouseUp() {
+    if (!chatHistoryResizeActive) {
+        return
+    }
+    chatHistoryResizeActive = false
+    document.removeEventListener('mousemove', onChatHistoryResizeMouseMove)
+    document.removeEventListener('mouseup', onChatHistoryResizeMouseUp)
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+    try {
+        localStorage.setItem(CHAT_HISTORY_W_KEY, String(chatHistoryWidthPx.value))
+    } catch {
+        /* ignore */
+    }
+}
+
+function startChatHistoryResize(e) {
+    if (chatHistoryCollapsed.value || chatLayoutIsNarrow.value) {
+        return
+    }
+    chatHistoryResizeActive = true
+    chatHistoryResizeStartX = e.clientX
+    chatHistoryResizeStartW = chatHistoryWidthPx.value
+    document.addEventListener('mousemove', onChatHistoryResizeMouseMove)
+    document.addEventListener('mouseup', onChatHistoryResizeMouseUp)
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+}
+
+function toggleChatHistoryCollapse() {
+    chatHistoryCollapsed.value = !chatHistoryCollapsed.value
+    try {
+        localStorage.setItem(CHAT_HISTORY_C_KEY, chatHistoryCollapsed.value ? '1' : '0')
+    } catch {
+        /* ignore */
+    }
+}
+
+const chatHistorySidebarStyle = computed(() => {
+    if (chatLayoutIsNarrow.value) {
+        return {}
+    }
+    return {
+        width: `${chatHistoryWidthPx.value}px`,
+        flexShrink: 0,
+    }
+})
+
+watch(chatLayoutIsNarrow, (narrow) => {
+    if (narrow) {
+        chatHistoryCollapsed.value = false
+    }
+})
+
 /** 我的 Word 模板库 */
 const myTemplates = ref([])
 const myTemplatesLoading = ref(false)
@@ -732,11 +1084,12 @@ const modelForm = ref({
     is_enabled: true,
 })
 
-/** 语音识别 Whisper：与对话模型分离，仅存浏览器 localStorage，随会议上传带给后端 */
+/** 实时 ASR（Qwen3）：仅存浏览器 localStorage，会议 WebSocket 握手时由前端发送给网关 */
 const WHISPER_ASR_STORAGE_KEY = 'openclaw_whisper_asr_v1'
-const DEFAULT_WHISPER_ASR_BASE = 'https://api.openai.com/v1'
-const whisperAsrApiKey = ref('')
-const whisperAsrBaseUrl = ref(DEFAULT_WHISPER_ASR_BASE)
+const DEFAULT_REALTIME_ASR_WS =
+    'wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model=qwen3-asr-flash-realtime-2026-02-10'
+const whisperAsrRealtimeWsUrl = ref(DEFAULT_REALTIME_ASR_WS)
+const whisperAsrRealtimeApiKey = ref('')
 
 function loadWhisperAsrFromStorage() {
     if (typeof localStorage === 'undefined') {
@@ -745,16 +1098,17 @@ function loadWhisperAsrFromStorage() {
     try {
         const raw = localStorage.getItem(WHISPER_ASR_STORAGE_KEY)
         if (!raw) {
-            whisperAsrApiKey.value = ''
-            whisperAsrBaseUrl.value = DEFAULT_WHISPER_ASR_BASE
+            whisperAsrRealtimeWsUrl.value = DEFAULT_REALTIME_ASR_WS
+            whisperAsrRealtimeApiKey.value = ''
             return
         }
         const o = JSON.parse(raw)
-        whisperAsrApiKey.value = String(o.whisperApiKey ?? '')
-        whisperAsrBaseUrl.value = String(o.whisperBaseUrl || DEFAULT_WHISPER_ASR_BASE).trim() || DEFAULT_WHISPER_ASR_BASE
+        whisperAsrRealtimeWsUrl.value =
+            String(o.realtimeAsrWsUrl || o.asrWsUrl || '').trim() || DEFAULT_REALTIME_ASR_WS
+        whisperAsrRealtimeApiKey.value = String(o.realtimeAsrApiKey ?? o.asrApiKey ?? '').trim()
     } catch {
-        whisperAsrApiKey.value = ''
-        whisperAsrBaseUrl.value = DEFAULT_WHISPER_ASR_BASE
+        whisperAsrRealtimeWsUrl.value = DEFAULT_REALTIME_ASR_WS
+        whisperAsrRealtimeApiKey.value = ''
     }
 }
 
@@ -764,11 +1118,11 @@ function saveWhisperAsrToStorage() {
         return
     }
     const payload = {
-        whisperApiKey: String(whisperAsrApiKey.value || '').trim(),
-        whisperBaseUrl: String(whisperAsrBaseUrl.value || '').trim() || DEFAULT_WHISPER_ASR_BASE,
+        realtimeAsrWsUrl: String(whisperAsrRealtimeWsUrl.value || '').trim() || DEFAULT_REALTIME_ASR_WS,
+        realtimeAsrApiKey: String(whisperAsrRealtimeApiKey.value || '').trim(),
     }
     localStorage.setItem(WHISPER_ASR_STORAGE_KEY, JSON.stringify(payload))
-    ElMessage.success('语音识别 (ASR) 配置已保存到本机，会议转写时会自动随请求发送到服务器。')
+    ElMessage.success('实时 ASR 配置已保存到本机；会议纪要页将通过 WebSocket 使用该配置。')
 }
 
 /** 外联推送：企业微信 / 飞书 Webhook，存服务端 SQLite system_configs */
@@ -838,7 +1192,7 @@ async function testWebhookPush(channel) {
         if (!r.ok || !d.success) {
             throw new Error(d.message || `HTTP ${r.status}`)
         }
-        ElMessage.success('OpenClaw 链路测试消息已发送，请到群内查看')
+        ElMessage.success('会意助手链路测试消息已发送，请到群内查看')
     } catch (e) {
         ElMessage.error(String(e?.message || e || '测试推送失败'))
     } finally {
@@ -853,11 +1207,11 @@ function getInitialChatMessages() {
             role: 'assistant',
             isHtml: true,
             content:
-                '你好！我是 OpenClaw 对话助手。我可以帮你：<br><br>' +
+                '你好！我是会意助手对话助手。我可以帮你：<br><br>' +
                 '&#8226; <strong>直接操作工作台</strong> — 比如"帮我创建会议纪要"、"打开模板引擎"<br>' +
                 '&#8226; <strong>智能问答</strong> — 回答关于功能使用的问题<br>' +
                 '&#8226; <strong>快捷跳转</strong> — 说"去API配置"即可跳转到配置页<br><br>' +
-                '试试输入：<em>"帮我生成一个PPT大纲"</em> 或 <em>"配置OpenAI的API"</em>',
+                '试试输入：<em>"帮我创建会议纪要"</em> 或 <em>"打开模板引擎"</em>',
         },
     ]
 }
@@ -951,6 +1305,8 @@ watch(
 const savedSkills = ref([])
 const activeChatSkill = ref(null)
 const skillExtractLoading = ref(false)
+/** 本条助手气泡是否已提交评分（会话内记忆） */
+const likedAssistantTurnIds = ref({})
 const skillPickerOpen = ref(false)
 const skillPickerQuery = ref('')
 const filteredSkills = computed(() => {
@@ -1133,7 +1489,7 @@ function buildPaperSystemContextBlock() {
     const ct = paperSummaryContentType.value || '未分类'
     const dim = paperSummaryDimensions.value
     const payload = { content_type: ct, ...dim }
-    return `【OpenClaw·材料结构化摘要】以下 JSON 为工作台提炼的键值要点，供本轮对话使用。\n${JSON.stringify(payload)}`
+    return `【会意助手·材料结构化摘要】以下 JSON 为工作台提炼的键值要点，供本轮对话使用。\n${JSON.stringify(payload)}`
 }
 
 function getPaperChatFileName() {
@@ -1186,7 +1542,7 @@ function formatPaperSummaryForChat() {
     return [head, ...lines].filter(Boolean).join('\n\n')
 }
 
-/** 将当前文献卡片同步到 OpenClaw 全局上下文（Pinia），供其他 Tab / 对话读取 */
+/** 将当前文献卡片同步到会意助手工作台全局上下文（Pinia），供其他 Tab / 对话读取 */
 function syncLiteratureToOpenclawStore() {
     const s = paperSummary.value
     if (!s || typeof s !== 'object') {
@@ -1208,7 +1564,7 @@ function syncLiteratureToOpenclawStore() {
 
 watch([paperSummary, paperTitle], syncLiteratureToOpenclawStore, { deep: true })
 
-/** 指挥 OpenClaw：快捷意图 → 对话助手 + 文献 system 上下文 + 低温严谨参数 */
+/** 指挥会意助手：快捷意图 → 对话助手 + 文献 system 上下文 + 低温严谨参数 */
 const PAPER_OPENCLAW_QUICK_COMMANDS = [
     {
         id: 'email',
@@ -1268,6 +1624,9 @@ function goTab(tab) {
 }
 
 watch(currentTab, (tab) => {
+    if (tab === 'overview') {
+        nextTick(() => onRatingsChartResize())
+    }
     if (tab === 'apiConfig') {
         loadWhisperAsrFromStorage()
         fetchModelConfigs()
@@ -1289,6 +1648,9 @@ watch(currentTab, (tab) => {
         void loadMyTemplates()
         void loadTemplateFillRecords(30)
         void loadLibraryItems()
+    }
+    if (tab === 'reminders') {
+        void loadRemindersBoard()
     }
 })
 
@@ -1353,6 +1715,10 @@ function updateDueTodoAlerts() {
     const now = Date.now()
     const alerted = getTodoAlertedIds()
     const due = [...upcomingOverdue.value, ...upcomingSoon.value].filter((t) => {
+        const st = String(t.status || 'pending').toLowerCase()
+        if (st === 'notified') {
+            return false
+        }
         const dueAt = Date.parse(t.remindAt)
         if (!Number.isFinite(dueAt) || dueAt > now) {
             return false
@@ -1361,6 +1727,69 @@ function updateDueTodoAlerts() {
     })
     dueTodoAlerts.value = due
     dueTodoAlertVisible.value = due.length > 0
+}
+
+function formatTodoClock(remindAt) {
+    const d = new Date(remindAt)
+    if (!Number.isFinite(d.getTime())) {
+        return '—'
+    }
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+function parseTodoRepeatCustomDays(raw) {
+    if (Array.isArray(raw)) {
+        return raw.map((x) => Number.parseInt(String(x), 10)).filter((n) => Number.isFinite(n) && n >= 1 && n <= 7)
+    }
+    try {
+        const a = JSON.parse(String(raw || '[]'))
+        return Array.isArray(a)
+            ? a.map((x) => Number.parseInt(String(x), 10)).filter((n) => Number.isFinite(n) && n >= 1 && n <= 7)
+            : []
+    } catch {
+        return []
+    }
+}
+
+function todoRepeatTag(mode, repeatCustomDaysRaw) {
+    const m = String(mode || 'once').toLowerCase()
+    if (m === 'daily') {
+        return { label: '每天', kind: 'daily' }
+    }
+    if (m === 'workday') {
+        return { label: '工作日', kind: 'workday' }
+    }
+    if (m === 'custom_days') {
+        const days = parseTodoRepeatCustomDays(repeatCustomDaysRaw)
+        const map = { 1: '一', 2: '二', 3: '三', 4: '四', 5: '五', 6: '六', 7: '日' }
+        const label =
+            days.length > 0 ? `每周${days.map((d) => `周${map[d] || d}`).join('、')}` : '自定义'
+        return { label, kind: 'custom' }
+    }
+    return { label: '单次', kind: 'once' }
+}
+
+function todoStatusDisplay(t) {
+    if (Number(t.done) === 1) {
+        return { label: '已完成', kind: 'done' }
+    }
+    const st = String(t.status || 'pending').toLowerCase()
+    if (st === 'notified') {
+        return { label: '已推送', kind: 'notified' }
+    }
+    return { label: '未完成', kind: 'pending' }
+}
+
+function isTodoPastDue(t) {
+    if (Number(t.done) === 1) {
+        return false
+    }
+    const st = String(t.status || 'pending').toLowerCase()
+    if (st === 'notified') {
+        return false
+    }
+    const dueAt = Date.parse(t.remindAt)
+    return Number.isFinite(dueAt) && dueAt <= Date.now()
 }
 
 function dismissDueTodoAlerts() {
@@ -1436,6 +1865,26 @@ async function loadTodosForDrawer() {
     }
 }
 
+async function loadRemindersBoard() {
+    const email = userStore.user?.email
+    if (!email) {
+        remindersBoardTodos.value = []
+        return
+    }
+    remindersBoardLoading.value = true
+    try {
+        const r = await fetch(`/api/todos?email=${encodeURIComponent(email)}`)
+        const d = await r.json().catch(() => ({}))
+        if (r.ok && d.success) {
+            remindersBoardTodos.value = d.items || []
+        }
+    } catch {
+        remindersBoardTodos.value = []
+    } finally {
+        remindersBoardLoading.value = false
+    }
+}
+
 async function markTodoDoneRow(row) {
     const email = userStore.user?.email
     if (!email || !row?.id) {
@@ -1452,10 +1901,42 @@ async function markTodoDoneRow(row) {
             throw new Error(d.message || `HTTP ${r.status}`)
         }
         void loadTodosForDrawer()
+        void loadRemindersBoard()
         void loadTodoPendingCount()
         void loadTodosUpcoming()
+        updateDueTodoAlerts()
     } catch (e) {
         ElMessage.error(String(e?.message || e || '操作失败'))
+    }
+}
+
+async function snoozeTodoRow(row, minutes = 10) {
+    const email = userStore.user?.email
+    if (!email || !row?.id) {
+        return
+    }
+    todoSnoozingId.value = row.id
+    try {
+        const r = await fetch(`/api/todos/${row.id}/snooze`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, minutes }),
+        })
+        const d = await r.json().catch(() => ({}))
+        if (!r.ok || !d.success) {
+            throw new Error(d.message || `HTTP ${r.status}`)
+        }
+        ElMessage.success(`已推迟 ${minutes} 分钟后再提醒`)
+        void loadTodosForDrawer()
+        void loadRemindersBoard()
+        void loadTodoPendingCount()
+        void loadTodosUpcoming()
+        updateDueTodoAlerts()
+        checkDueTodoNotifications()
+    } catch (e) {
+        ElMessage.error(String(e?.message || e || '稍后提醒失败'))
+    } finally {
+        todoSnoozingId.value = null
     }
 }
 
@@ -1471,8 +1952,10 @@ async function deleteTodoRow(row) {
             throw new Error(d.message || `HTTP ${r.status}`)
         }
         void loadTodosForDrawer()
+        void loadRemindersBoard()
         void loadTodoPendingCount()
         void loadTodosUpcoming()
+        updateDueTodoAlerts()
     } catch (e) {
         ElMessage.error(String(e?.message || e || '删除失败'))
     }
@@ -1493,6 +1976,9 @@ function checkDueTodoNotifications() {
     const now = Date.now()
     const notified = getTodoNotifiedIds()
     for (const t of [...upcomingSoon.value, ...upcomingOverdue.value]) {
+        if (String(t.status || 'pending').toLowerCase() === 'notified') {
+            continue
+        }
         const due = Date.parse(t.remindAt)
         if (!Number.isFinite(due) || due > now) {
             continue
@@ -1501,13 +1987,84 @@ function checkDueTodoNotifications() {
             continue
         }
         try {
-            new Notification('OpenClaw 待办提醒', { body: t.title })
+            new Notification('会意助手待办提醒', { body: t.title })
             markTodoNotified(t.id)
         } catch {
             /* ignore */
         }
     }
     updateDueTodoAlerts()
+}
+
+function toggleReminderCustomDay(day) {
+    const arr = [...(reminderForm.value.repeatCustomDays || [])]
+    const i = arr.indexOf(day)
+    if (i >= 0) {
+        arr.splice(i, 1)
+    } else {
+        arr.push(day)
+    }
+    arr.sort((a, b) => a - b)
+    reminderForm.value.repeatCustomDays = arr
+}
+
+function formatDatetimeLocalForInput(iso) {
+    const d = new Date(iso)
+    if (!Number.isFinite(d.getTime())) {
+        return ''
+    }
+    const pad = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+function openReminderTimeEdit(row) {
+    if (!row?.id || !row.remindAt) {
+        return
+    }
+    reminderTimeEditRow.value = row
+    reminderTimeEditDraft.value = formatDatetimeLocalForInput(row.remindAt)
+    reminderTimeEditOpen.value = true
+}
+
+async function saveReminderTimeEdit() {
+    const email = userStore.user?.email
+    const row = reminderTimeEditRow.value
+    if (!email || !row?.id) {
+        return
+    }
+    const raw = String(reminderTimeEditDraft.value || '').trim()
+    if (!raw) {
+        ElMessage.warning('请选择时间')
+        return
+    }
+    const d = new Date(raw)
+    if (!Number.isFinite(d.getTime())) {
+        ElMessage.warning('时间无效')
+        return
+    }
+    const remindAt = d.toISOString()
+    reminderTimeEditSaving.value = true
+    try {
+        const r = await fetch(`/api/todos/${row.id}/remind-at`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, remindAt }),
+        })
+        const resJson = await r.json().catch(() => ({}))
+        if (!r.ok || !resJson.success) {
+            throw new Error(resJson.message || `HTTP ${r.status}`)
+        }
+        ElMessage.success('已更新提醒时间')
+        reminderTimeEditOpen.value = false
+        void loadRemindersBoard()
+        void loadTodosUpcoming()
+        void loadTodoPendingCount()
+        void loadTodosForDrawer()
+    } catch (e) {
+        ElMessage.error(String(e?.message || e || '更新失败'))
+    } finally {
+        reminderTimeEditSaving.value = false
+    }
 }
 
 async function submitReminder() {
@@ -1519,6 +2076,7 @@ async function submitReminder() {
     const title = String(reminderForm.value.title || '').trim()
     const remindAt = String(reminderForm.value.remindAt || '').trim()
     const notes = String(reminderForm.value.notes || '').trim()
+    const repeatMode = reminderForm.value.repeatMode || 'once'
     if (!title) {
         ElMessage.warning('请填写待办标题')
         return
@@ -1527,21 +2085,43 @@ async function submitReminder() {
         ElMessage.warning('请选择提醒时间')
         return
     }
+    if (repeatMode === 'custom_days' && !(reminderForm.value.repeatCustomDays || []).length) {
+        ElMessage.warning('自定义重复请至少选择一个星期')
+        return
+    }
     reminderSaving.value = true
     try {
+        const payload = {
+            userEmail: email,
+            title,
+            remindAt,
+            notes,
+            source: 'manual',
+            repeatMode,
+        }
+        if (repeatMode === 'custom_days') {
+            payload.repeatCustomDays = reminderForm.value.repeatCustomDays || []
+        }
         const r = await fetch('/api/todos', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ userEmail: email, title, remindAt, notes, source: 'manual' }),
+            body: JSON.stringify(payload),
         })
         const d = await r.json().catch(() => ({}))
         if (!r.ok || !d.success) {
             throw new Error(d.message || `HTTP ${r.status}`)
         }
-        reminderForm.value = { title: '', remindAt: '', notes: '' }
+        reminderForm.value = {
+            title: '',
+            remindAt: '',
+            notes: '',
+            repeatMode: 'once',
+            repeatCustomDays: [],
+        }
         ElMessage.success('已新增提醒')
         void loadTodosUpcoming()
         void loadTodoPendingCount()
+        void loadRemindersBoard()
     } catch (e) {
         ElMessage.error(String(e?.message || e || '新增提醒失败'))
     } finally {
@@ -1663,6 +2243,49 @@ function downloadLibraryItem(row) {
     window.open(`/api/library/items/${row.id}/file?email=${encodeURIComponent(email)}`, '_blank')
 }
 
+function startLibraryRename(row) {
+    libraryRenamingId.value = row.id
+    libraryRenameDraft.value = row.title || ''
+}
+
+function cancelLibraryRename() {
+    libraryRenamingId.value = null
+}
+
+async function commitLibraryRename(row) {
+    if (libraryRenamingId.value !== row.id) {
+        return
+    }
+    const draft = String(libraryRenameDraft.value || '').trim().slice(0, 240)
+    const prev = String(row.title || '').trim()
+    if (!draft || draft === prev) {
+        cancelLibraryRename()
+        return
+    }
+    const email = userStore.user?.email
+    if (!email) {
+        ElMessage.warning('请先登录')
+        cancelLibraryRename()
+        return
+    }
+    try {
+        const r = await fetch(`/api/files/${row.id}/rename`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, newName: draft }),
+        })
+        const d = await r.json().catch(() => ({}))
+        if (!r.ok || !d.success) {
+            throw new Error(d.message || `HTTP ${r.status}`)
+        }
+        ElMessage.success('已重命名')
+        cancelLibraryRename()
+        await loadLibraryItems()
+    } catch (e) {
+        ElMessage.error(String(e?.message || e || '重命名失败'))
+    }
+}
+
 async function editLibraryItem(row) {
     const email = userStore.user?.email
     if (!email || !row?.id) {
@@ -1749,6 +2372,17 @@ function libraryItemTypeLabel(type) {
     if (t === 'meeting') return '会议纪要'
     if (t === 'summary') return '摘要记录'
     return '文件资料'
+}
+
+function libraryItemTypeIconComponent(type) {
+    const t = String(type || '')
+    if (t === 'meeting') {
+        return Microphone
+    }
+    if (t === 'summary') {
+        return DocumentChecked
+    }
+    return Document
 }
 
 function downloadTemplateRecord(row) {
@@ -1996,12 +2630,25 @@ onMounted(() => {
         speechSupported.value = !!getSpeechRecognitionCtor()
         bellScreenPos.value = loadBellScreenPosFromStorage()
         window.addEventListener('resize', onBellWindowResize, { passive: true })
+        window.addEventListener('resize', onRatingsChartResize, { passive: true })
         loadWhisperAsrFromStorage()
         loadChatPersonaLocalStorage()
+        updateChatLayoutNarrow()
+        window.addEventListener('resize', updateChatLayoutNarrow, { passive: true })
+        try {
+            chatHistoryCollapsed.value = localStorage.getItem(CHAT_HISTORY_C_KEY) === '1'
+            const rw = Number.parseInt(String(localStorage.getItem(CHAT_HISTORY_W_KEY) || ''), 10)
+            if (Number.isFinite(rw) && rw >= 200 && rw <= 420) {
+                chatHistoryWidthPx.value = rw
+            }
+        } catch {
+            /* ignore */
+        }
     }
     void fetchWebhookConfigs()
     fetchSavedSkills()
     void loadDashboardStats()
+    void loadRatingsTrend()
     void loadUserImpressionProfile()
     void loadTodosUpcoming()
     void loadTodoPendingCount()
@@ -2011,7 +2658,7 @@ onMounted(() => {
         void loadTodosUpcoming()
             .then(() => checkDueTodoNotifications())
             .then(() => loadTodoPendingCount())
-    }, 45000)
+    }, 10000)
     nextTick(() => {
         void maybeOpenWelcomeWizard()
     })
@@ -2029,6 +2676,7 @@ function handleLogout() {
 function clearChat() {
     currentChatSessionId.value = null
     chatMessages.value = getInitialChatMessages()
+    likedAssistantTurnIds.value = {}
     chatInput.value = ''
     chatLoadedPaperLabel.value = ''
     activeChatSkill.value = null
@@ -2124,7 +2772,7 @@ async function extractSkillFromConversation() {
     await runSkillExtractFromMessages()
 }
 
-/** 从当前对话提炼 Skill（供顶栏与 👍 复用） */
+/** 从当前对话提炼 Skill（顶栏与气泡底部「打包 Skill」共用） */
 async function runSkillExtractFromMessages() {
     if (!userStore.user?.email) {
         ElMessage.warning('请先登录后再打包 Skill')
@@ -2186,7 +2834,7 @@ async function runSkillExtractFromMessages() {
     }
 }
 
-/** 对话助手 AI 气泡：仅正常完成流式输出后展示 👍 */
+/** 对话助手 AI 气泡：仅正常完成流式输出后展示点赞入口 */
 function canShowAssistantLikeBtn(message) {
     if (!message || message.role !== 'assistant' || message.isHtml) {
         return false
@@ -2203,9 +2851,43 @@ function canShowAssistantLikeBtn(message) {
     return String(message.content || '').trim().length > 0
 }
 
-function onAssistantThumbsUp() {
-    ElMessage.success('感谢认可！')
-    void runSkillExtractFromMessages()
+function assistantTurnKey(message) {
+    return String(message?._clientTurnId || '')
+}
+
+function isAssistantLiked(message) {
+    const k = assistantTurnKey(message)
+    return Boolean(k && likedAssistantTurnIds.value[k])
+}
+
+async function onAssistantThumbsUp(message) {
+    const k = assistantTurnKey(message)
+    if (!k) {
+        return
+    }
+    if (!userStore.user?.email) {
+        ElMessage.warning('请先登录后再评分')
+        return
+    }
+    if (likedAssistantTurnIds.value[k]) {
+        return
+    }
+    try {
+        const r = await fetch('/api/ratings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ score: 1 }),
+        })
+        const d = await r.json().catch(() => ({}))
+        if (!r.ok || !d.success) {
+            throw new Error(d.message || `HTTP ${r.status}`)
+        }
+        likedAssistantTurnIds.value = { ...likedAssistantTurnIds.value, [k]: true }
+        ElMessage.success('感谢您的评分！')
+        void loadRatingsTrend()
+    } catch (e) {
+        ElMessage.error(String(e?.message || e || '评分失败'))
+    }
 }
 
 const welcomeWizardOpen = ref(false)
@@ -2282,7 +2964,7 @@ async function submitWelcomeWizard() {
             localStorage.setItem(onboardingStorageKey(), '1')
         }
         welcomeWizardOpen.value = false
-        ElMessage.success('已保存，OpenClaw 会更懂你的语境～')
+        ElMessage.success('已保存，会意助手会更懂你的语境')
     } catch (e) {
         ElMessage.error(String(e?.message || e || '保存失败'))
     }
@@ -2498,53 +3180,6 @@ async function saveUserImpressionProfile() {
     }
 }
 
-/** 答辩演示：清空对话 + 服务端画像与缓冲；Skill 库不动 */
-async function confirmDemoPresentationReset() {
-    const email = userStore.user?.email
-    if (!email) {
-        ElMessage.warning('请先登录后再使用演示重置')
-        return
-    }
-    try {
-        await ElMessageBox.confirm(
-            '将清空当前对话与服务器上的「眼中的你」画像缓存（Skill 库保留）。适合答辩反复演示。',
-            '演示重置',
-            { confirmButtonText: '重置', cancelButtonText: '取消', type: 'warning' },
-        )
-    } catch {
-        return
-    }
-    try {
-        const r = await fetch('/api/user/demo-reset', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email }),
-        })
-        let data = {}
-        try {
-            data = await r.json()
-        } catch {
-            data = {}
-        }
-        if (!r.ok || !data.success) {
-            throw new Error(data.message || `HTTP ${r.status}`)
-        }
-        chatMessages.value = getInitialChatMessages()
-        chatInput.value = ''
-        chatLoadedPaperLabel.value = ''
-        activeChatSkill.value = null
-        currentChatSessionId.value = null
-        clearCompanionChat()
-        userImpression.value = { ...DEFAULT_USER_IMPRESSION, ...data.profile }
-        if (!Array.isArray(userImpression.value.emotion_history)) {
-            userImpression.value.emotion_history = []
-        }
-        ElMessage.success('演示状态已重置')
-    } catch (e) {
-        ElMessage.error(String(e?.message || e || '重置失败'))
-    }
-}
-
 function startEditImpression(key) {
     editingImpressionField.value = key
 }
@@ -2744,6 +3379,7 @@ function mapDbRowToChatMessage(row) {
         statusBanner: '',
         pendingNavTab: '',
         streamFailed: !!extra.streamFailed,
+        _clientTurnId: row.id != null ? `db-msg-${row.id}` : undefined,
     }
     if (extra.isHtml) {
         m.isHtml = true
@@ -3022,6 +3658,7 @@ async function sendChatMessage(overrideText, options = {}) {
         statusBanner: '',
         pendingNavTab: '',
         streamFailed: false,
+        _clientTurnId: `turn-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
     }
     const assistantIndex = messagesRef.value.length
     messagesRef.value.push(assistantMessage)
@@ -3256,6 +3893,8 @@ function bindPaperLocalFile(file) {
     if (file.type === 'application/pdf' || name.endsWith('.pdf')) {
         paperFileKind.value = 'pdf'
         paperPdfObjectUrl.value = URL.createObjectURL(file)
+    } else if (name.endsWith('.doc')) {
+        paperFileKind.value = 'doc'
     } else {
         paperFileKind.value = 'docx'
     }
@@ -3323,7 +3962,7 @@ async function parsePaperViaFormData(file, opts = {}) {
     paperCharCount.value = data.charCount || 0
     paperSourceTruncated.value = !!data.truncated
     if (!paperTitle.value.trim() && file.name) {
-        paperTitle.value = file.name.replace(/\.(pdf|docx)$/i, '')
+        paperTitle.value = file.name.replace(/\.(pdf|doc|docx)$/i, '')
     }
     if (showSuccessToast) {
         ElMessage.success('文档已解析为纯文本')
@@ -3519,8 +4158,13 @@ onBeforeUnmount(() => {
     revokePaperPdfUrl()
     stopSpeechInput()
     teardownBellDragListeners()
+    document.removeEventListener('mousemove', onChatHistoryResizeMouseMove)
+    document.removeEventListener('mouseup', onChatHistoryResizeMouseUp)
     if (typeof window !== 'undefined') {
         window.removeEventListener('resize', onBellWindowResize)
+        window.removeEventListener('resize', onRatingsChartResize)
+        window.removeEventListener('resize', updateChatLayoutNarrow)
+        disposeRatingsChart()
         if (streamScrollRafId) {
             cancelAnimationFrame(streamScrollRafId)
             streamScrollRafId = 0
@@ -3739,7 +4383,7 @@ async function testModelConnection() {
 }
 
 function modelTypeLabel(type) {
-    const map = { aliyun: '阿里云百炼', openai: 'OpenAI 兼容', openclaw: 'OpenClaw 网关' }
+    const map = { aliyun: '阿里云百炼', openai: 'OpenAI 兼容', openclaw: '会意助手本地网关' }
     return map[type] || type
 }
 
@@ -4254,7 +4898,7 @@ async function handleExportWord() {
         return
     }
 
-    saveAs(lastWordBlob.value, 'openclaw-template.docx')
+    saveAs(lastWordBlob.value, 'huiyi-template.docx')
 }
 </script>
 
@@ -4324,14 +4968,26 @@ async function handleExportWord() {
             </div>
 
             <div v-if="dueTodoAlertVisible" class="dashboard-reminder-bar" role="alert">
-                <span class="dashboard-reminder-label dashboard-reminder-label--overdue">到点提醒</span>
-                <span
-                    v-for="t in dueTodoAlerts.slice(0, 3)"
-                    :key="`due-${t.id}`"
-                    class="dashboard-reminder-chip dashboard-reminder-chip--overdue"
-                    :title="t.title"
-                >{{ t.title }}</span>
-                <span v-if="dueTodoAlerts.length > 3" class="dashboard-reminder-chip">还有 {{ dueTodoAlerts.length - 3 }} 项</span>
+                <div
+                    class="dashboard-reminder-main"
+                    tabindex="0"
+                    role="button"
+                    @click="openTodoDrawer"
+                    @keydown.enter.prevent="openTodoDrawer"
+                >
+                    <span class="dashboard-reminder-label dashboard-reminder-label--overdue">到点提醒</span>
+                    <span class="dashboard-reminder-count">您有 {{ dueTodoAlerts.length }} 个待办已到期</span>
+                    <div class="dashboard-reminder-marquee">
+                        <span
+                            v-for="t in dueTodoAlerts.slice(0, 6)"
+                            :key="`due-${t.id}`"
+                            class="dashboard-reminder-chip dashboard-reminder-chip--overdue"
+                            :title="t.title"
+                        >{{ t.title }}</span>
+                        <span v-if="dueTodoAlerts.length > 6" class="dashboard-reminder-more">还有 {{ dueTodoAlerts.length - 6 }} 项…</span>
+                    </div>
+                    <span class="dashboard-reminder-hint">点击查看全部</span>
+                </div>
                 <div class="dashboard-reminder-actions">
                     <button type="button" class="btn btn-outline btn-xs" @click="openTodoDrawer">查看待办</button>
                     <button type="button" class="btn btn-ghost btn-xs" @click="dismissDueTodoAlerts">知道了</button>
@@ -4342,15 +4998,51 @@ async function handleExportWord() {
                 <p v-if="!userStore.user?.email" class="todo-drawer-guest">登录后查看从对话与会议纪要中静默提取的待办。</p>
                 <template v-else>
                     <div v-if="todosDrawerLoading" class="todo-drawer-loading">加载中…</div>
-                    <ul v-else-if="todosDrawerList.length === 0" class="todo-drawer-empty">暂无待办</ul>
+                    <ul v-else-if="sortedTodosDrawerList.length === 0" class="todo-drawer-empty">暂无待办</ul>
                     <ul v-else class="todo-drawer-list">
-                        <li v-for="t in todosDrawerList" :key="t.id" class="todo-drawer-item" :class="{ 'todo-drawer-item--done': Number(t.done) === 1 }">
-                            <div class="todo-drawer-item-main">
-                                <span class="todo-drawer-title">{{ t.title }}</span>
+                        <li
+                            v-for="t in sortedTodosDrawerList"
+                            :key="t.id"
+                            class="todo-drawer-item todo-alarm-card todo-drawer-item--card"
+                            :class="{ 'todo-drawer-item--done': Number(t.done) === 1 }"
+                        >
+                            <div class="todo-alarm-card__time">{{ formatTodoClock(t.remindAt) }}</div>
+                            <div class="todo-drawer-item-main todo-alarm-card__body">
+                                <div class="todo-alarm-card__head">
+                                    <span class="todo-drawer-title">{{ t.title }}</span>
+                                    <span
+                                        class="todo-drawer-status-tag"
+                                        :class="{
+                                            'todo-drawer-status-tag--pending': todoStatusDisplay(t).kind === 'pending',
+                                            'todo-drawer-status-tag--notified': todoStatusDisplay(t).kind === 'notified',
+                                            'todo-drawer-status-tag--done': todoStatusDisplay(t).kind === 'done',
+                                        }"
+                                    >{{ todoStatusDisplay(t).label }}</span>
+                                    <span
+                                        class="todo-mode-tag"
+                                        :class="{
+                                            'todo-mode-tag--daily': todoRepeatTag(t.repeatMode, t.repeatCustomDays).kind === 'daily',
+                                            'todo-mode-tag--workday': todoRepeatTag(t.repeatMode, t.repeatCustomDays).kind === 'workday',
+                                            'todo-mode-tag--custom': todoRepeatTag(t.repeatMode, t.repeatCustomDays).kind === 'custom',
+                                        }"
+                                    >{{ todoRepeatTag(t.repeatMode, t.repeatCustomDays).label }}</span>
+                                </div>
                                 <span class="todo-drawer-meta">{{ t.remindAt }}{{ t.source ? ' · ' + t.source : '' }}</span>
                                 <p v-if="t.notes" class="todo-drawer-notes">{{ t.notes }}</p>
                             </div>
                             <div class="todo-drawer-actions">
+                                <button
+                                    v-if="Number(t.done) === 0 && isTodoPastDue(t)"
+                                    type="button"
+                                    class="btn btn-accent btn-xs todo-snooze-btn"
+                                    :disabled="todoSnoozingId === t.id"
+                                    @click="snoozeTodoRow(t, 10)"
+                                >
+                                    <span class="todo-snooze-inner">
+                                        <el-icon :size="14"><AlarmClock /></el-icon>
+                                        10 分钟后再提醒
+                                    </span>
+                                </button>
                                 <button v-if="Number(t.done) === 0" type="button" class="btn btn-outline btn-xs" @click="markTodoDoneRow(t)">完成</button>
                                 <button type="button" class="btn btn-ghost btn-xs" @click="deleteTodoRow(t)">删除</button>
                             </div>
@@ -4362,54 +5054,71 @@ async function handleExportWord() {
             <!-- ===== TAB: OVERVIEW ===== -->
             <div v-show="currentTab === 'overview'" class="tab-content" id="tabOverview">
                 <div class="stats-row">
-                    <div class="stat-card">
-                        <div class="stat-icon" style="background:#eef2ff;color:#4a6cf7;">D</div>
-                        <div>
-                            <div class="stat-value">{{ dashboardStats.conversation_turns }}</div>
-                            <div class="stat-label">累计对话轮次</div>
+                    <div class="stat-card stat-card--metric">
+                        <div class="stat-metric-left" style="background: #eef2ff; color: #4a6cf7">
+                            <el-icon class="stat-metric-icon" :size="30"><ChatLineRound /></el-icon>
+                        </div>
+                        <div class="stat-metric-body">
+                            <div class="stat-metric-label">累计对话轮次</div>
+                            <div class="stat-metric-value">{{ dashboardStats.conversation_turns }}</div>
+                            <div class="stat-metric-foot">系统持续为您沉淀对话价值</div>
                         </div>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-icon" style="background:#ecfdf5;color:#10b981;">&#10003;</div>
-                        <div>
-                            <div class="stat-value">{{ dashboardStats.skills_count }}</div>
-                            <div class="stat-label">已生成技能数</div>
+                    <div class="stat-card stat-card--metric">
+                        <div class="stat-metric-left" style="background: #ecfdf5; color: #059669">
+                            <el-icon class="stat-metric-icon" :size="30"><MagicStick /></el-icon>
+                        </div>
+                        <div class="stat-metric-body">
+                            <div class="stat-metric-label">已生成技能数</div>
+                            <div class="stat-metric-value">{{ dashboardStats.skills_count }}</div>
+                            <div class="stat-metric-foot">技能与场景能力持续扩展</div>
                         </div>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-icon" style="background:#fffbeb;color:#f59e0b;">T</div>
-                        <div>
-                            <div class="stat-value">{{ dashboardStats.papers_processed }}</div>
-                            <div class="stat-label">文献处理次数</div>
+                    <div class="stat-card stat-card--metric">
+                        <div class="stat-metric-left" style="background: #fffbeb; color: #d97706">
+                            <el-icon class="stat-metric-icon" :size="30"><Reading /></el-icon>
+                        </div>
+                        <div class="stat-metric-body">
+                            <div class="stat-metric-label">文献处理次数</div>
+                            <div class="stat-metric-value">{{ dashboardStats.papers_processed }}</div>
+                            <div class="stat-metric-foot">文献摘要与结构化笔记持续累积</div>
                         </div>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-icon" style="background:#f5f3ff;color:#7c3aed;">&#128077;</div>
-                        <div>
-                            <div class="stat-value">—</div>
-                            <div class="stat-label">认可即沉淀</div>
-                            <div class="stat-subhint">对话里点 👍 即可触发打包 Skill</div>
+                    <div class="stat-card stat-card--ratings-trend">
+                        <div class="stat-ratings-head">
+                            <div class="stat-metric-left stat-ratings-head-icon" style="background: #f5f3ff; color: #7c3aed">
+                                <el-icon :size="26"><Histogram /></el-icon>
+                            </div>
+                            <div class="stat-ratings-head-text">
+                                <div class="stat-label">认可即沉淀</div>
+                                <div class="stat-subhint">历史满意度 / 点赞趋势（近 90 天）</div>
+                            </div>
+                        </div>
+                        <div class="stat-ratings-chart-area">
+                            <div v-if="ratingsTrendLoading" class="stat-ratings-empty">加载趋势中…</div>
+                            <div v-else-if="!ratingsTrendData.length" class="stat-ratings-empty">暂无评分数据，可在对话中为回复点赞以形成趋势</div>
+                            <div v-else ref="ratingsTrendChartRef" class="stat-ratings-chart-el"></div>
                         </div>
                     </div>
                 </div>
 
                 <div class="template-showcase">
                     <h2>智能模板引擎 — 核心创新</h2>
-                    <p class="subtitle">使用 <strong>{变量}</strong>、<strong>[选项]</strong>、<strong>&#123;&#123;自动填充&#125;&#125;</strong> 语法创建模板，AI自动识别并精准填写。告别重复的格式指令！</p>
+                    <p class="subtitle">使用 <strong>{变量}</strong> 与 <strong>&#123;&#123;自动填充&#125;&#125;</strong> 语法创建模板，AI 自动识别并精准填写。</p>
                     <div class="template-code-block">
                         <span style="color:#6c7086;"># 会议纪要模板 v2.0</span><br>
                         <span style="color:#a6e3a1;">## 会议主题：</span><span class="token-var">{会议主题}</span><br>
                         <span style="color:#a6e3a1;">## 时间地点：</span><span class="token-fill">&#123;&#123;自动提取时间地点&#125;&#125;</span><br>
                         <span style="color:#a6e3a1;">## 参会人员：</span><span class="token-fill">&#123;&#123;从录音中识别参会人&#125;&#125;</span><br>
                         <span style="color:#a6e3a1;">## 核心决议</span><br>
-                        <span style="color:#f38ba8;">决议类型：</span><span class="token-bracket">[通过|否决|延期讨论]</span><br>
+                        <span style="color:#f38ba8;">决议类型：</span><span class="token-var">{决议类型}</span><br>
                         <span style="color:#a6e3a1;">## 待办事项</span><br>
                         <span class="token-var">{待办事项列表}</span> <span style="color:#6c7086;">AI自动提取并推送日历</span><br>
                         <span style="color:#a6e3a1;">## 分歧点</span><br>
                         <span class="token-var">{主要分歧}</span> <span style="color:#6c7086;">自动归纳不同意见</span>
                     </div>
                     <div class="template-demo-row">
-                        <div class="template-demo-card" @click="goTab('templates')">
+                        <div v-if="false" class="template-demo-card" @click="goTab('templates')">
                             <div class="demo-icon">&#9679;</div>
                             <div class="label">会议纪要模板</div>
                             <div class="hint">12个变量 · 自动填充</div>
@@ -4419,13 +5128,13 @@ async function handleExportWord() {
                             <div class="label">论文摘要模板</div>
                             <div class="hint">8个变量 · 结构化卡片</div>
                         </div>
-                        <div class="template-demo-card" @click="goTab('templates')">
+                        <div v-if="false" class="template-demo-card" @click="goTab('templates')">
                             <div class="demo-icon">&#9650;</div>
                             <div class="label">PPT大纲模板</div>
                             <div class="hint">逐页自动生成</div>
                         </div>
                         <div class="template-demo-card" @click="goTab('templates')">
-                            <div class="demo-icon">&#128203;</div>
+                            <div class="demo-icon demo-icon--ep" aria-hidden="true"><el-icon :size="22"><Document /></el-icon></div>
                             <div class="label">周报汇报模板</div>
                             <div class="hint">结构化条目 · 一键填充</div>
                         </div>
@@ -4437,11 +5146,11 @@ async function handleExportWord() {
                     <span class="see-all">拖拽排序</span>
                 </div>
                 <div class="cards-grid">
-                    <div class="card" @click="goTab('meeting')">
+                    <div v-if="false" class="card" @click="goTab('meeting')">
                         <div class="card-icon blue">&#9679;</div>
                         <span class="card-badge badge-popular">热门</span>
                         <h3>智能会议纪要</h3>
-                        <p>上传录音→Whisper转写→结构化纪要+日历待办自动推送</p>
+                        <p>实时 WebSocket 转写→结构化纪要+日历待办自动推送</p>
                         <span class="card-arrow">&#8594;</span>
                     </div>
                     <div class="card" @click="goTab('paper')">
@@ -4451,7 +5160,7 @@ async function handleExportWord() {
                         <p>上传PDF→读取+检索补充→结构化笔记卡片（方法/创新/局限）</p>
                         <span class="card-arrow">&#8594;</span>
                     </div>
-                    <div class="card" @click="goTab('ppt')">
+                    <div v-if="false" class="card" @click="goTab('ppt')">
                         <div class="card-icon amber">&#9650;</div>
                         <span class="card-badge badge-new">NEW</span>
                         <h3>PPT大纲生成</h3>
@@ -4484,8 +5193,27 @@ async function handleExportWord() {
             <div v-show="currentTab === 'chat'" class="tab-content tab-chat-workbench tab-chat-gemini-root" id="tabChat">
                 <div class="chat-gemini-layout" :class="{ 'chat-gemini-layout--history-open': chatHistoryOverlayOpen }">
                     <div class="chat-gemini-backdrop" @click="chatHistoryOverlayOpen = false"></div>
-                    <aside class="chat-history-sidebar" aria-label="会话历史">
-                        <button type="button" class="chat-new-session-btn" @click="createNewChatSession">+ 新对话</button>
+                    <aside
+                        v-if="chatLayoutIsNarrow || !chatHistoryCollapsed"
+                        class="chat-history-sidebar"
+                        aria-label="会话历史"
+                        :style="chatHistorySidebarStyle"
+                    >
+                        <div class="chat-history-sidebar-toolbar">
+                            <button
+                                v-if="!chatLayoutIsNarrow"
+                                type="button"
+                                class="chat-history-collapse-btn"
+                                title="收起会话列表"
+                                aria-label="收起会话列表"
+                                @click="toggleChatHistoryCollapse"
+                            >
+                                <el-icon :size="16"><DArrowLeft /></el-icon>
+                            </button>
+                            <button type="button" class="chat-new-session-btn chat-new-session-btn--toolbar" @click="createNewChatSession">
+                                + 新对话
+                            </button>
+                        </div>
                         <div v-if="!userStore.user?.email" class="chat-history-hint">登录后可同步多会话历史。</div>
                         <div v-else-if="chatSessionsLoading" class="chat-history-loading">加载中…</div>
                         <ul v-else class="chat-history-list">
@@ -4498,7 +5226,14 @@ async function handleExportWord() {
                             >
                                 <span class="chat-history-title">{{ s.title || '未命名' }}</span>
                                 <span v-if="s.personaLabel || s.skillName" class="chat-history-meta">
-                                    {{ s.personaEmoji || '💬' }} {{ s.personaLabel || '默认身份' }}<template v-if="s.skillName"> · ⚡ {{ s.skillName }}</template>
+                                    <span class="chat-history-meta-line">
+                                        <el-icon class="chat-history-meta-ico" :size="14"><component :is="chatSessionPersonaIcon(s)" /></el-icon>
+                                        <span>{{ s.personaLabel || '默认身份' }}</span>
+                                    </span>
+                                    <span v-if="s.skillName" class="chat-history-meta-line chat-history-meta-line--skill">
+                                        <el-icon class="chat-history-meta-ico" :size="14"><Lightning /></el-icon>
+                                        <span>{{ s.skillName }}</span>
+                                    </span>
                                 </span>
                                 <button
                                     type="button"
@@ -4507,7 +5242,7 @@ async function handleExportWord() {
                                     aria-label="删除会话"
                                     @click.stop="deleteChatSessionRow(s, $event)"
                                 >
-                                    🗑️
+                                    <el-icon :size="16"><Delete /></el-icon>
                                 </button>
                             </li>
                         </ul>
@@ -4520,21 +5255,40 @@ async function handleExportWord() {
                             清空所有记录
                         </button>
                     </aside>
+                    <div
+                        v-if="!chatLayoutIsNarrow && !chatHistoryCollapsed"
+                        class="chat-history-resizer"
+                        aria-hidden="true"
+                        @mousedown.prevent="startChatHistoryResize"
+                    />
+                    <button
+                        v-if="!chatLayoutIsNarrow && chatHistoryCollapsed"
+                        type="button"
+                        class="chat-history-expand-rail"
+                        title="展开会话列表"
+                        aria-label="展开会话列表"
+                        @click="toggleChatHistoryCollapse"
+                    >
+                        <el-icon :size="18"><DArrowRight /></el-icon>
+                    </button>
                     <div class="chat-gemini-main">
                         <header class="chat-gemini-toolbar">
                             <button
                                 type="button"
                                 class="chat-history-menu-btn"
-                                aria-label="展开或收起会话列表"
-                                @click="chatHistoryOverlayOpen = !chatHistoryOverlayOpen"
+                                :aria-label="chatLayoutIsNarrow ? '展开或收起会话列表' : (chatHistoryCollapsed ? '展开会话列表' : '收起会话列表')"
+                                @click="
+                                    chatLayoutIsNarrow ? (chatHistoryOverlayOpen = !chatHistoryOverlayOpen) : toggleChatHistoryCollapse()
+                                "
                             >
-                                ☰
+                                <el-icon :size="20"><Menu /></el-icon>
                             </button>
                             <div class="chat-gemini-toolbar-center">
-                                <span class="chat-gemini-brand">OpenClaw</span>
+                                <span class="chat-gemini-brand">会意助手</span>
                                 <span v-if="chatLoadedPaperLabel" class="chat-gemini-pill">{{ chatLoadedPaperLabel }}</span>
                                 <span v-if="activeChatSkill" class="chat-gemini-pill chat-gemini-pill--skill">
-                                    ⚡ {{ activeChatSkill.name }}
+                                    <el-icon class="chat-gemini-pill-ico" :size="13"><Lightning /></el-icon>
+                                    {{ activeChatSkill.name }}
                                     <button type="button" class="chat-gemini-pill-x" title="取消 Skill" @click="clearActiveChatSkill">×</button>
                                 </span>
                             </div>
@@ -4559,7 +5313,7 @@ async function handleExportWord() {
                                     class="chat-msg"
                                     :class="message.role === 'assistant' ? 'assistant' : 'user'"
                                 >
-                                    <div class="msg-avatar">{{ message.role === 'assistant' ? 'OC' : (userStore.user?.name || 'U').charAt(0).toUpperCase() }}</div>
+                                    <div class="msg-avatar">{{ message.role === 'assistant' ? '会' : (userStore.user?.name || 'U').charAt(0).toUpperCase() }}</div>
                                     <div v-if="message.isHtml" class="msg-bubble" v-html="message.content"></div>
                                     <div v-else-if="message.role === 'assistant'" class="msg-bubble assistant-stream-bubble">
                                         <div v-if="message.statusBanner" class="chat-agent-status" role="status">{{ message.statusBanner }}</div>
@@ -4568,7 +5322,7 @@ async function handleExportWord() {
                                             class="clarification-card"
                                             :class="message.clarificationCard.resolved ? 'clarification-card--resolved' : 'clarification-card--active'"
                                         >
-                                            <div class="clarification-card-title">💡 还需要一点细节</div>
+                                            <div class="clarification-card-title">还需要一点细节</div>
                                             <template v-if="!message.clarificationCard.resolved">
                                                 <p class="clarification-card-lead">请先补齐下列要点，便于我给出可用方案。</p>
                                                 <div
@@ -4611,11 +5365,23 @@ async function handleExportWord() {
                                             <button
                                                 type="button"
                                                 class="chat-like-btn"
-                                                title="认可本条回复并打包为专属 Skill"
-                                                :disabled="skillExtractLoading || !userStore.user?.email"
-                                                @click="onAssistantThumbsUp"
+                                                :class="{ 'chat-like-btn--on': isAssistantLiked(message) }"
+                                                title="为本条回复评分（点赞）"
+                                                :disabled="!userStore.user?.email"
+                                                @click="onAssistantThumbsUp(message)"
                                             >
-                                                👍 <span class="chat-like-label">赞</span>
+                                                <el-icon class="chat-like-ico" :size="16"><Pointer /></el-icon>
+                                                <span class="chat-like-label">赞</span>
+                                            </button>
+                                            <button
+                                                type="button"
+                                                class="chat-pack-skill-btn"
+                                                title="将当前对话提炼并打包为 Skill"
+                                                :disabled="skillExtractLoading || !userStore.user?.email || !canPackSkill"
+                                                @click="extractSkillFromConversation"
+                                            >
+                                                <el-icon class="chat-like-ico" :size="16"><Lightning /></el-icon>
+                                                <span class="chat-like-label">打包 Skill</span>
                                             </button>
                                         </div>
                                     </div>
@@ -4638,7 +5404,6 @@ async function handleExportWord() {
                             </transition>
                             <div class="chat-suggestions chat-suggestions--gemini" id="chatSuggestions">
                                 <span class="chat-suggestion-chip" @click="sendQuickChat('帮我创建会议纪要')">创建会议纪要</span>
-                                <span class="chat-suggestion-chip" @click="sendQuickChat('生成PPT大纲')">生成PPT大纲</span>
                                 <span class="chat-suggestion-chip" @click="sendQuickChat('打开模板引擎')">打开模板引擎</span>
                                 <span class="chat-suggestion-chip" @click="sendQuickChat('配置API')">配置API</span>
                                 <span class="chat-suggestion-chip" @click="openTodoDrawer">待办事项</span>
@@ -4675,7 +5440,7 @@ async function handleExportWord() {
                                     v-model="chatInput"
                                     class="chat-composer-textarea"
                                     rows="1"
-                                    placeholder="问问 OpenClaw…（Shift+Enter 换行，Enter 发送；输入 @ 唤醒技能）"
+                                    placeholder="问问会意助手…（Shift+Enter 换行，Enter 发送；输入 @ 唤醒技能）"
                                     @input="handleChatInputSkill"
                                     @keydown.esc.stop="closeSkillPicker"
                                     @keydown="onChatComposerKeydown"
@@ -4691,7 +5456,7 @@ async function handleExportWord() {
                                         :aria-label="speechSupported ? '语音输入' : '语音不可用'"
                                         @click="toggleSpeechInput('chat')"
                                     >
-                                        <span class="chat-mic-icon" aria-hidden="true">&#127908;</span>
+                                        <span class="chat-mic-icon" aria-hidden="true"><el-icon :size="18"><Microphone /></el-icon></span>
                                     </button>
                                     <button type="button" class="send-btn send-btn--inset" title="发送" aria-label="发送" @click="sendChatMessage()">&#9654;</button>
                                 </div>
@@ -4702,7 +5467,7 @@ async function handleExportWord() {
                 </div>
                 <el-drawer
                     v-model="impressionDrawerVisible"
-                    title="OpenClaw 眼中的你"
+                    title="会意助手眼中的你"
                     direction="rtl"
                     size="380px"
                     append-to-body
@@ -4754,7 +5519,10 @@ async function handleExportWord() {
                             :disabled="impressionLoading"
                             @click="router.push({ name: 'growth' })"
                         >
-                            📊 查看我的情绪仪表盘
+                            <span class="btn-ico-text">
+                                <el-icon :size="16"><TrendCharts /></el-icon>
+                                查看我的情绪仪表盘
+                            </span>
                         </el-button>
                         <el-button
                             type="primary"
@@ -4862,51 +5630,8 @@ async function handleExportWord() {
                             <li>
                                 上传模板后，右侧面板会列出识别到的变量。点击「AI 自动填充」时，模型按上下文填入；也可手动改每条变量再导出。
                             </li>
-                            <li><code>[选项甲|选项乙]</code>：方括号 + 竖线，提示模型在语境中<strong>择一</strong>写入。</li>
                             <li>
                                 需要 AI 扩写一段说明时，在花括号内写清楚指令，例如 <code>{请用三句话写本周风险与对策}</code>，描述越具体，填充越稳。
-                            </li>
-                        </ul>
-                    </div>
-                    <div v-if="!currentFile" class="my-templates-panel">
-                        <div class="my-templates-head">
-                            <h4>我的模板库</h4>
-                            <span v-if="myTemplatesLoading" class="my-templates-hint">加载中…</span>
-                            <span v-else class="my-templates-hint">共 {{ myTemplates.length }} 个 · 登录后上传即可入库</span>
-                        </div>
-                        <div v-if="!userStore.user?.email" class="my-templates-empty">登录后可在此管理已上传的 Word 模板。</div>
-                        <ul v-else-if="myTemplates.length === 0" class="my-templates-empty">暂无模板：请点击上方上传 .docx，上传成功后会出现在此列表并可打开、重命名与删除。</ul>
-                        <ul v-else class="my-templates-list">
-                            <li v-for="row in myTemplates" :key="row.id" class="my-templates-row">
-                                <span class="my-templates-name" :title="row.originalName">{{ row.originalName }}</span>
-                                <span class="my-templates-meta">
-                                    <span v-if="row.folderPath">📁 {{ row.folderPath }} · </span>{{ row.uploadedAt || row.uploaded_at }}
-                                    <template v-if="row.tags?.length"> · {{ row.tags.join(' / ') }}</template>
-                                </span>
-                                <div class="my-templates-actions">
-                                    <button type="button" class="btn btn-outline btn-xs" @click="openMyTemplate(row)">打开</button>
-                                    <button type="button" class="btn btn-outline btn-xs" @click="renameMyTemplate(row)">重命名</button>
-                                    <button type="button" class="btn btn-outline btn-xs" @click="editTemplateOrganization(row)">整理</button>
-                                    <button type="button" class="btn btn-ghost btn-xs" @click="deleteMyTemplate(row)">删除</button>
-                                </div>
-                            </li>
-                        </ul>
-                    </div>
-                    <div v-if="!currentFile" class="my-templates-panel template-history-panel">
-                        <div class="my-templates-head">
-                            <h4>生成历史</h4>
-                            <span class="my-templates-hint">自动保存最近 8 次填充结果</span>
-                        </div>
-                        <div v-if="!userStore.user?.email" class="my-templates-empty">登录后可回溯已生成的模板记录。</div>
-                        <ul v-else-if="templateFillRecords.length === 0" class="my-templates-empty">暂无生成历史。完成一次 AI 自动填充后会自动存档。</ul>
-                        <ul v-else class="my-templates-list">
-                            <li v-for="row in templateFillRecords" :key="row.id" class="my-templates-row">
-                                <span class="my-templates-name" :title="row.templateName">{{ row.templateName || '未命名模板' }}</span>
-                                <span class="my-templates-meta">{{ row.createdAt }}</span>
-                                <div class="my-templates-actions">
-                                    <button type="button" class="btn btn-outline btn-xs" @click="applyTemplateRecordVariables(row)">复用变量</button>
-                                    <button type="button" class="btn btn-outline btn-xs" @click="downloadTemplateRecord(row)">下载</button>
-                                </div>
                             </li>
                         </ul>
                     </div>
@@ -4954,7 +5679,7 @@ async function handleExportWord() {
                                 <li v-for="row in myTemplates" :key="row.id" class="library-row">
                                     <div class="library-row-main">
                                         <strong>{{ row.originalName }}</strong>
-                                        <span><template v-if="row.folderPath">📁 {{ row.folderPath }} · </template>{{ row.uploadedAt || row.uploaded_at }}</span>
+                                        <span><template v-if="row.folderPath"><span class="lib-folder-inline"><el-icon :size="13"><Folder /></el-icon> {{ row.folderPath }} · </span></template>{{ row.uploadedAt || row.uploaded_at }}</span>
                                         <em v-if="row.tags?.length">{{ row.tags.join(' / ') }}</em>
                                     </div>
                                     <div class="library-row-actions">
@@ -4992,10 +5717,10 @@ async function handleExportWord() {
                     <div class="library-section-head">
                         <div>
                             <h3>文件资料库：文档、论文与会议纪要</h3>
-                            <p>支持手动上传 PDF / Docx / TXT / MD；文献解析、结构化摘要和会议纪要会自动归档到这里。你可以手动建文件夹，也可以让 Agent 自动归类。</p>
+                            <p>支持手动上传 PDF / Word（.docx，旧版 .doc 仅存文件）/ TXT / MD；文献解析、结构化摘要和会议纪要会自动归档到这里。你可手动建文件夹，也可用 Agent 整理。</p>
                         </div>
                         <div class="library-section-actions">
-                            <input ref="libraryFileInputRef" class="sr-only" type="file" accept=".pdf,.docx,.txt,.md" @change="handleLibraryFileUpload" />
+                            <input ref="libraryFileInputRef" class="sr-only" type="file" accept=".pdf,.doc,.docx,.txt,.md,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" @change="handleLibraryFileUpload" />
                             <button type="button" class="btn btn-outline btn-sm" :disabled="libraryUploading" @click="triggerLibraryUpload">上传资料</button>
                             <button type="button" class="btn btn-primary btn-sm" :disabled="libraryLoading" @click="agentOrganizeLibrary">Agent 整理</button>
                         </div>
@@ -5006,23 +5731,41 @@ async function handleExportWord() {
                         <button type="button" class="btn btn-outline btn-sm" @click="loadLibraryItems">刷新</button>
                     </div>
                     <div v-if="libraryFolders.length" class="library-folder-cloud">
-                        <span v-for="f in libraryFolders" :key="f.name">📁 {{ f.name }} <b>{{ f.count }}</b></span>
+                        <span v-for="f in libraryFolders" :key="f.name" class="lib-folder-chip"><el-icon :size="13"><Folder /></el-icon> {{ f.name }} <b>{{ f.count }}</b></span>
                     </div>
                     <div v-if="!userStore.user?.email" class="library-empty library-empty--wide">登录后可查看个人资料库。</div>
                     <div v-else-if="libraryLoading" class="library-empty library-empty--wide">资料库加载中…</div>
                     <div v-else-if="libraryFilteredItems.length === 0" class="library-empty library-empty--wide">暂无资料。上传文件、处理会议纪要或解析文献后会自动出现在这里。</div>
                     <ul v-else class="library-file-list">
                         <li v-for="row in libraryFilteredItems" :key="row.id" class="library-file-row">
-                            <div class="library-file-icon">{{ row.itemType === 'meeting' ? '🎙️' : row.itemType === 'summary' ? '📝' : '📄' }}</div>
+                            <div class="library-file-icon library-file-icon--ep" aria-hidden="true">
+                                <el-icon :size="20"><component :is="libraryItemTypeIconComponent(row.itemType)" /></el-icon>
+                            </div>
                             <div class="library-file-main">
                                 <div class="library-file-title">
-                                    <strong>{{ row.title }}</strong>
-                                    <span>{{ libraryItemTypeLabel(row.itemType) }}</span>
+                                    <template v-if="libraryRenamingId === row.id">
+                                        <el-input
+                                            v-model="libraryRenameDraft"
+                                            size="small"
+                                            class="library-rename-input"
+                                            maxlength="240"
+                                            @blur="commitLibraryRename(row)"
+                                            @keyup.enter="commitLibraryRename(row)"
+                                            @keydown.esc.prevent="cancelLibraryRename"
+                                        />
+                                    </template>
+                                    <template v-else>
+                                        <strong>{{ row.title }}</strong>
+                                        <button type="button" class="library-rename-ico" title="重命名" aria-label="重命名" @click.stop="startLibraryRename(row)">
+                                            <el-icon :size="16"><EditPen /></el-icon>
+                                        </button>
+                                        <span>{{ libraryItemTypeLabel(row.itemType) }}</span>
+                                    </template>
                                 </div>
                                 <p v-if="row.summaryText" class="library-file-excerpt">{{ String(row.summaryText).slice(0, 160) }}</p>
                                 <p v-else-if="row.contentText" class="library-file-excerpt">{{ String(row.contentText).slice(0, 160) }}</p>
                                 <div class="library-file-meta">
-                                    <span>📁 {{ row.folderPath || '未分组' }}</span>
+                                    <span class="lib-folder-inline"><el-icon :size="13"><Folder /></el-icon> {{ row.folderPath || '未分组' }}</span>
                                     <span>{{ row.createdAt }}</span>
                                     <span v-if="row.tags?.length">{{ row.tags.join(' / ') }}</span>
                                 </div>
@@ -5047,7 +5790,7 @@ async function handleExportWord() {
         <div v-if="!paperWorkbenchHasSource" class="paper-tab-empty">
             <el-empty description="请先上传文献，我将为您生成结构化摘要" :image-size="88">
                 <template #default>
-                    <p class="paper-empty-hint">支持 PDF / Word，或通过公开链接拉取正文后再生成结构化摘要。</p>
+                    <p class="paper-empty-hint">支持 PDF / Word（推荐 .docx；旧版 .doc 请先另存为 .docx），或通过链接拉取正文后再生成摘要。</p>
                     <div class="paper-empty-upload">
                         <label class="sr-only" for="tab-paper-upload-file-empty">上传 PDF 或 Word 文献</label>
                         <input
@@ -5055,7 +5798,7 @@ async function handleExportWord() {
                             ref="paperFileInputRef"
                             name="paper_upload_file_empty"
                             type="file"
-                            accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                             class="paper-file-native"
                             @change="onPaperFileSelected"
                         />
@@ -5122,7 +5865,7 @@ async function handleExportWord() {
                                     ref="paperFileInputRef"
                                     name="paper_upload_file"
                                     type="file"
-                                    accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                    accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                                     class="paper-file-native"
                                     @change="onPaperFileSelected"
                                 />
@@ -5218,8 +5961,8 @@ async function handleExportWord() {
                                         要点 + 原文讨论
                                     </el-button>
                                 </div>
-                                <div class="paper-openclaw-command" role="navigation" aria-label="指挥 OpenClaw 处理此摘要">
-                                    <div class="paper-openclaw-command__title">指挥 OpenClaw 处理此内容</div>
+                                <div class="paper-openclaw-command" role="navigation" aria-label="指挥会意助手处理此摘要">
+                                    <div class="paper-openclaw-command__title">指挥会意助手处理此内容</div>
                                     <div class="paper-openclaw-command__grid">
                                         <el-button
                                             v-for="cmd in PAPER_OPENCLAW_QUICK_COMMANDS"
@@ -5323,7 +6066,7 @@ async function handleExportWord() {
             <div class="companion-persona-row">
                 <label class="companion-persona-label" for="companion-persona-select">陪伴人格</label>
                 <select id="companion-persona-select" v-model="companionSettings.persona" class="companion-persona-select" name="companion_persona">
-                    <option value="default">默认 OpenClaw</option>
+                    <option value="default">默认会意助手</option>
                     <option value="strict_mentor">严厉导师</option>
                     <option value="warm_sister">温柔知心大姐</option>
                     <option value="grumpy_bro">暴躁老哥</option>
@@ -5411,7 +6154,7 @@ async function handleExportWord() {
                         :title="speechSupported ? '语音输入（点击开始/结束）' : '当前浏览器不支持语音输入'"
                         @click="toggleSpeechInput('companion')"
                     >
-                        <span class="chat-mic-icon" aria-hidden="true">&#127908;</span>
+                        <span class="chat-mic-icon" aria-hidden="true"><el-icon :size="18"><Microphone /></el-icon></span>
                     </button>
                     <button type="button" class="send-btn companion-send" @click="sendChatMessage(undefined, { chatMode: CHAT_MODE_COMPANION })" title="发送">&#9654;</button>
                 </div>
@@ -5439,7 +6182,9 @@ async function handleExportWord() {
             @click="selectWorkbenchPersona(p.id)"
             @keydown.enter.prevent="selectWorkbenchPersona(p.id)"
         >
-            <div class="identity-persona-emoji" aria-hidden="true">{{ p.emoji }}</div>
+            <div class="identity-persona-icon-wrap" aria-hidden="true">
+                <el-icon :size="28" class="identity-persona-elicon"><component :is="p.iconComponent" /></el-icon>
+            </div>
             <h3>{{ p.title }}</h3>
             <p>{{ p.desc }}</p>
             <span class="identity-persona-pill">{{ chatActivePersonaId === p.id ? '当前使用' : '点击切换' }}</span>
@@ -5454,7 +6199,9 @@ async function handleExportWord() {
             @click="selectWorkbenchPersona(p.id)"
             @keydown.enter.prevent="selectWorkbenchPersona(p.id)"
         >
-            <div class="identity-persona-emoji" aria-hidden="true">{{ p.emoji }}</div>
+            <div class="identity-persona-icon-wrap" aria-hidden="true">
+                <el-icon :size="28" class="identity-persona-elicon"><UserFilled /></el-icon>
+            </div>
             <h3>{{ p.name }}</h3>
             <p class="identity-custom-snippet">
                 {{ p.systemPrompt.length > 96 ? `${p.systemPrompt.slice(0, 96)}…` : p.systemPrompt }}
@@ -5485,14 +6232,14 @@ async function handleExportWord() {
         placeholder="如：答辩专用副驾"
         autocomplete="off"
     />
-    <label class="welcome-wizard-label" for="cp-emoji">头像（Emoji）</label>
+    <label class="welcome-wizard-label" for="cp-emoji">角标（1–2 字符，可选）</label>
     <input
         id="cp-emoji"
         v-model="customPersonaForm.emoji"
         class="welcome-wizard-input"
-        maxlength="8"
+        maxlength="2"
         name="custom_persona_emoji"
-        placeholder="如 🤖"
+        placeholder="如 研"
     />
     <label class="welcome-wizard-label" for="cp-prompt">性格设定（System Prompt）</label>
     <textarea
@@ -5547,6 +6294,28 @@ async function handleExportWord() {
                         placeholder="备注（可选）"
                     ></textarea>
                 </div>
+                <div class="reminder-form-row">
+                    <label class="reminder-inline-label" for="reminder-repeat">重复</label>
+                    <select id="reminder-repeat" v-model="reminderForm.repeatMode" class="reminder-select" name="reminder_repeat">
+                        <option value="once">单次</option>
+                        <option value="daily">每天</option>
+                        <option value="workday">工作日</option>
+                        <option value="custom_days">自定义星期</option>
+                    </select>
+                </div>
+                <div v-if="reminderForm.repeatMode === 'custom_days'" class="reminder-form-row reminder-custom-days">
+                    <span class="reminder-inline-label">重复日</span>
+                    <div class="reminder-weekday-grid">
+                        <label v-for="w in WEEKDAY_CHECKBOXES" :key="w.value" class="reminder-weekday-item">
+                            <input
+                                type="checkbox"
+                                :checked="(reminderForm.repeatCustomDays || []).includes(w.value)"
+                                @change="toggleReminderCustomDay(w.value)"
+                            />
+                            {{ w.label }}
+                        </label>
+                    </div>
+                </div>
                 <button
                     class="btn btn-accent btn-sm"
                     style="width:100%;"
@@ -5555,33 +6324,103 @@ async function handleExportWord() {
                     @click="submitReminder"
                 >{{ reminderSaving ? '保存中…' : '+ 手动添加提醒' }}</button>
             </div>
-            <div class="reminder-list">
+            <div class="reminder-list reminder-board">
                 <p v-if="!userStore.user?.email" class="todo-drawer-guest">登录后查看与新增提醒。</p>
-                <div v-else-if="upcomingSoon.length === 0 && upcomingOverdue.length === 0" class="todo-drawer-empty">暂无提醒</div>
-                <div v-else class="reminder-section">
-                    <div v-if="upcomingOverdue.length" class="reminder-group">
-                        <div class="reminder-group-title">已到点 / 逾期</div>
-                        <ul class="reminder-items">
-                            <li v-for="t in upcomingOverdue" :key="`overdue-${t.id}`">
-                                <strong>{{ t.title }}</strong>
-                                <span>{{ t.remindAt }}</span>
-                            </li>
-                        </ul>
+                <template v-else>
+                    <div class="reminders-board-tabs" role="tablist">
+                        <button
+                            type="button"
+                            class="reminders-board-tab"
+                            :class="{ 'reminders-board-tab--active': remindersBoardTab === 'pending' }"
+                            role="tab"
+                            :aria-selected="remindersBoardTab === 'pending'"
+                            @click="remindersBoardTab = 'pending'"
+                        >
+                            待推送
+                            <span class="reminders-board-tab-count">{{ remindersPendingBoard.length }}</span>
+                        </button>
+                        <button
+                            type="button"
+                            class="reminders-board-tab"
+                            :class="{ 'reminders-board-tab--active': remindersBoardTab === 'pushed' }"
+                            role="tab"
+                            :aria-selected="remindersBoardTab === 'pushed'"
+                            @click="remindersBoardTab = 'pushed'"
+                        >
+                            已推送记录
+                            <span class="reminders-board-tab-count">{{ remindersPushedBoard.length }}</span>
+                        </button>
                     </div>
-                    <div v-if="upcomingSoon.length" class="reminder-group">
-                        <div class="reminder-group-title">即将到来</div>
-                        <ul class="reminder-items">
-                            <li v-for="t in upcomingSoon" :key="`soon-${t.id}`">
-                                <strong>{{ t.title }}</strong>
-                                <span>{{ t.remindAt }}</span>
-                            </li>
-                        </ul>
-                    </div>
-                </div>
+                    <div v-if="remindersBoardLoading" class="todo-drawer-loading">加载中…</div>
+                    <div
+                        v-else-if="remindersBoardTab === 'pending' && remindersPendingBoard.length === 0"
+                        class="todo-drawer-empty"
+                    >暂无待推送项（未到点或已全部推送的提醒见「已推送记录」）</div>
+                    <div
+                        v-else-if="remindersBoardTab === 'pushed' && remindersPushedBoard.length === 0"
+                        class="todo-drawer-empty"
+                    >暂无已推送记录</div>
+                    <ul v-else class="reminder-alarm-cards reminder-board-cards">
+                        <li
+                            v-for="t in (remindersBoardTab === 'pending' ? remindersPendingBoard : remindersPushedBoard)"
+                            :key="`rb-${t.id}`"
+                            class="todo-alarm-card reminder-alarm-card reminder-board-card"
+                        >
+                            <div class="todo-alarm-card__time">{{ formatTodoClock(t.remindAt) }}</div>
+                            <div class="todo-alarm-card__body">
+                                <div class="todo-alarm-card__head">
+                                    <strong class="reminder-card-title">{{ t.title }}</strong>
+                                    <span
+                                        class="todo-mode-tag"
+                                        :class="{
+                                            'todo-mode-tag--daily': todoRepeatTag(t.repeatMode, t.repeatCustomDays).kind === 'daily',
+                                            'todo-mode-tag--workday': todoRepeatTag(t.repeatMode, t.repeatCustomDays).kind === 'workday',
+                                            'todo-mode-tag--custom': todoRepeatTag(t.repeatMode, t.repeatCustomDays).kind === 'custom',
+                                        }"
+                                    >{{ todoRepeatTag(t.repeatMode, t.repeatCustomDays).label }}</span>
+                                </div>
+                                <span class="reminder-card-meta">{{ t.remindAt }}{{ t.source ? ' · ' + t.source : '' }}</span>
+                                <p v-if="t.notes" class="todo-drawer-notes">{{ t.notes }}</p>
+                                <div v-if="remindersBoardTab === 'pending' && Number(t.done) === 0" class="reminder-board-actions">
+                                    <button type="button" class="btn btn-outline btn-xs" title="修改时间" @click="openReminderTimeEdit(t)">
+                                        ✏️ 修改时间
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class="btn btn-ghost btn-xs"
+                                        :disabled="todoSnoozingId === t.id"
+                                        title="稍后 10 分钟"
+                                        @click="snoozeTodoRow(t, 10)"
+                                    >
+                                        💤 +10 分钟
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class="btn btn-ghost btn-xs"
+                                        :disabled="todoSnoozingId === t.id"
+                                        title="稍后 30 分钟"
+                                        @click="snoozeTodoRow(t, 30)"
+                                    >
+                                        💤 +30 分钟
+                                    </button>
+                                </div>
+                            </div>
+                        </li>
+                    </ul>
+                </template>
             </div>
         </div>
     </div>
 </div>
+
+<el-dialog v-model="reminderTimeEditOpen" title="修改提醒时间" width="420px" append-to-body destroy-on-close>
+    <label class="sr-only" for="reminder-edit-time">新的提醒时间</label>
+    <input id="reminder-edit-time" v-model="reminderTimeEditDraft" type="datetime-local" class="reminder-input" style="width:100%" />
+    <template #footer>
+        <el-button @click="reminderTimeEditOpen = false">取消</el-button>
+        <el-button type="primary" :loading="reminderTimeEditSaving" @click="saveReminderTimeEdit">保存</el-button>
+    </template>
+</el-dialog>
 
 <!-- ===== TAB: API CONFIG (新增API配置) ===== -->
 <div v-show="currentTab === 'apiConfig'" class="tab-content tab-api-config" id="tabApiConfig">
@@ -5593,41 +6432,42 @@ async function handleExportWord() {
     </div>
     <p class="api-config-intro">对话与模板填充将自动选用「已启用且优先级最高」的一条配置；数字越大优先级越高。列表中的 Key 为脱敏展示。【模型 ID】须与百炼 Code 一致（小写，如 <code>glm-5.1</code>、<code>qwen-plus</code>）；保存与请求时会自动转为小写。展示名可另填「GLM-5.1」等便于识别。</p>
 
-    <div class="api-whisper-asr-card">
-        <h3 class="api-whisper-asr-title">语音识别 (ASR) 配置</h3>
-        <p class="api-whisper-asr-desc">
-            与上方「文本对话模型」<strong>完全分离</strong>：Whisper 转写使用独立 Base URL（须支持 OpenAI 兼容的
-            <code>/v1/audio/transcriptions</code>，例如官方 <code>https://api.openai.com/v1</code>）。仅对话用的阿里云/豆包地址<strong>不能</strong>用于转写，否则会 404。
+    <!-- ASR：界面隐藏；配置仍由 loadWhisperAsrFromStorage / saveWhisperAsrToStorage 写入 localStorage，会议纪要页可读 -->
+    <div v-if="false" class="api-config-panel-card">
+        <h3 class="api-config-panel-title">语音识别 (ASR) 配置</h3>
+        <p class="api-config-panel-desc">
+            与上方「文本对话模型」<strong>完全分离</strong>。会议纪要使用 <strong>全双工 WebSocket</strong> 连接 DashScope Qwen3 实时 ASR；麦克风 WebM 由服务端
+            <strong>FFmpeg</strong> 转为 16kHz PCM 后转发。以下 Key 与 URL 仅存本机，在会议页建立 <code>/api/ws/realtime-asr</code> 时由浏览器发给网关。
         </p>
-        <div class="api-whisper-asr-grid">
-            <div class="api-whisper-asr-field">
-                <label class="api-whisper-asr-label" for="whisper-asr-key">Whisper API Key</label>
+        <div class="api-config-panel-grid">
+            <div class="api-config-panel-field api-config-panel-field--full">
+                <label class="api-config-panel-label" for="realtime-asr-ws">ASR WebSocket URL（实时 · Qwen3）</label>
                 <input
-                    id="whisper-asr-key"
-                    v-model="whisperAsrApiKey"
-                    name="whisper_asr_api_key"
-                    type="password"
-                    class="api-whisper-asr-input"
-                    placeholder="留空则会议转写时与「已启用文本模型」共用 Key"
-                    autocomplete="new-password"
-                />
-            </div>
-            <div class="api-whisper-asr-field">
-                <label class="api-whisper-asr-label" for="whisper-asr-base">Whisper Base URL</label>
-                <input
-                    id="whisper-asr-base"
-                    v-model="whisperAsrBaseUrl"
-                    name="whisper_asr_base_url"
+                    id="realtime-asr-ws"
+                    v-model="whisperAsrRealtimeWsUrl"
+                    name="realtime_asr_ws_url"
                     type="url"
-                    class="api-whisper-asr-input"
-                    placeholder="https://api.openai.com/v1"
+                    class="api-config-panel-input"
+                    :placeholder="DEFAULT_REALTIME_ASR_WS"
                     autocomplete="url"
                 />
             </div>
+            <div class="api-config-panel-field">
+                <label class="api-config-panel-label" for="realtime-asr-key">ASR API Key（实时 · 百炼）</label>
+                <input
+                    id="realtime-asr-key"
+                    v-model="whisperAsrRealtimeApiKey"
+                    name="realtime_asr_api_key"
+                    type="password"
+                    class="api-config-panel-input"
+                    placeholder="填写 DashScope / 百炼 API Key"
+                    autocomplete="new-password"
+                />
+            </div>
         </div>
-        <div class="api-whisper-asr-actions">
+        <div class="api-config-panel-actions">
             <button type="button" class="btn btn-primary btn-sm" @click="saveWhisperAsrToStorage">保存 ASR 配置到本机</button>
-            <span class="api-whisper-asr-note">配置写入浏览器 localStorage，刷新不丢失；发起会议纪要上传/录音时会一并提交给服务器。</span>
+            <span class="api-config-panel-note">配置写入浏览器 localStorage；会议页实时录音依赖本配置。</span>
         </div>
     </div>
 
@@ -5637,11 +6477,14 @@ async function handleExportWord() {
         <div
             v-for="row in modelConfigs"
             :key="row.id"
-            class="model-config-card"
+            class="api-config-panel-card model-config-card"
             :class="{ 'is-off': !row.is_enabled }"
         >
-            <div class="mcc-head">
-                <div class="mcc-head-text">
+            <div class="api-config-panel-head mcc-head">
+                <div class="api-config-panel-head-icon" aria-hidden="true">
+                    <el-icon :size="22"><Setting /></el-icon>
+                </div>
+                <div class="api-config-panel-head-text">
                     <div class="mcc-title">{{ row.name }}</div>
                     <div class="mcc-sub">{{ modelTypeLabel(row.type) }} · {{ row.model_name }}</div>
                 </div>
@@ -5658,14 +6501,20 @@ async function handleExportWord() {
                 </label>
             </div>
             <div class="mcc-body">
-                <div class="mcc-line"><span class="mcc-k">Base</span><span class="mcc-v" :title="row.base_url">{{ row.base_url }}</span></div>
-                <div class="mcc-line"><span class="mcc-k">Key</span><span class="mcc-v">{{ row.has_api_key ? row.api_key_masked : '未设置' }}</span></div>
+                <div class="mcc-line">
+                    <span class="mcc-k mcc-k--ico"><el-icon :size="14"><Link /></el-icon> Base</span>
+                    <span class="mcc-v" :title="row.base_url">{{ row.base_url }}</span>
+                </div>
+                <div class="mcc-line">
+                    <span class="mcc-k mcc-k--ico"><el-icon :size="14"><Key /></el-icon> Key</span>
+                    <span class="mcc-v">{{ row.has_api_key ? row.api_key_masked : '未设置' }}</span>
+                </div>
                 <div class="mcc-line mcc-pri-line">
                     <label class="mcc-k mcc-k--label" :for="'mcc-priority-' + row.id">优先级</label>
                     <input
                         :id="'mcc-priority-' + row.id"
                         v-model.number="row.priority"
-                        class="mcc-priority-input"
+                        class="mcc-priority-input api-config-panel-input api-config-panel-input--inline"
                         type="number"
                         :name="'mcc_priority_' + row.id"
                         min="0"
@@ -5689,13 +6538,13 @@ async function handleExportWord() {
 <div v-show="currentTab === 'webhookConfig'" class="tab-content webhook-config-tab" id="tabWebhookConfig">
     <p class="webhook-config-lead">
         待办到达提醒时间后，服务端会按下方 Webhook 向<strong>企业微信</strong>与<strong>飞书</strong>推送（轮询间隔由服务器环境变量
-        <code>TODO_PUSH_POLL_MS</code> 控制）。地址保存在服务器数据库，无需 <code>.env</code>；未填写则静默跳过对应渠道。
+        <code>TODO_PUSH_POLL_MS</code> 控制，默认约 10 秒）。地址保存在服务器数据库，无需 <code>.env</code>；未填写则静默跳过对应渠道。
     </p>
     <div v-if="webhookConfigLoading" class="webhook-config-loading">加载配置中…</div>
     <div v-else class="webhook-config-grid">
-        <div class="webhook-card webhook-card--wecom">
+            <div class="webhook-card webhook-card--wecom">
             <div class="webhook-card-head">
-                <span class="webhook-card-icon" aria-hidden="true">&#128188;</span>
+                <span class="webhook-card-icon webhook-card-icon--ep" aria-hidden="true"><el-icon :size="22"><Briefcase /></el-icon></span>
                 <div>
                     <h3 class="webhook-card-title">企业微信机器人 (WeCom)</h3>
                     <p class="webhook-card-sub">群机器人 Webhook，JSON 文本消息</p>
@@ -5718,13 +6567,14 @@ async function handleExportWord() {
                     :disabled="!String(webhookWecomUrl || '').trim() || webhookTestWecomLoading"
                     @click="testWebhookPush('wecom')"
                 >
-                    {{ webhookTestWecomLoading ? '发送中…' : '[⚡ 测试发送]' }}
+                    <span v-if="webhookTestWecomLoading">发送中…</span>
+                    <span v-else class="webhook-test-btn-inner"><el-icon :size="15"><Promotion /></el-icon> 测试发送</span>
                 </button>
             </div>
         </div>
-        <div class="webhook-card webhook-card--feishu">
+            <div class="webhook-card webhook-card--feishu">
             <div class="webhook-card-head">
-                <span class="webhook-card-icon" aria-hidden="true">&#128172;</span>
+                <span class="webhook-card-icon webhook-card-icon--ep" aria-hidden="true"><el-icon :size="22"><Comment /></el-icon></span>
                 <div>
                     <h3 class="webhook-card-title">飞书机器人 (Feishu)</h3>
                     <p class="webhook-card-sub">自定义机器人 Webhook</p>
@@ -5747,7 +6597,8 @@ async function handleExportWord() {
                     :disabled="!String(webhookFeishuUrl || '').trim() || webhookTestFeishuLoading"
                     @click="testWebhookPush('feishu')"
                 >
-                    {{ webhookTestFeishuLoading ? '发送中…' : '[⚡ 测试发送]' }}
+                    <span v-if="webhookTestFeishuLoading">发送中…</span>
+                    <span v-else class="webhook-test-btn-inner"><el-icon :size="15"><Promotion /></el-icon> 测试发送</span>
                 </button>
             </div>
         </div>
@@ -5763,7 +6614,7 @@ async function handleExportWord() {
 
 <el-dialog
     v-model="welcomeWizardOpen"
-    title="欢迎来到 OpenClaw"
+    title="欢迎来到会意助手"
     width="420px"
     align-center
     append-to-body
@@ -5826,7 +6677,7 @@ async function handleExportWord() {
             <select id="mcm-type" v-model="modelForm.type" name="mcm_type" class="mcm-input">
                 <option value="aliyun">阿里云百炼（OpenAI 兼容）</option>
                 <option value="openai">OpenAI 兼容</option>
-                <option value="openclaw">OpenClaw 本地网关</option>
+                <option value="openclaw">会意助手本地网关</option>
             </select>
 
             <label class="mcm-label" for="mcm-base-url">Base URL</label>
@@ -6239,10 +7090,16 @@ async function handleExportWord() {
     box-shadow: 0 6px 18px rgba(99, 102, 241, 0.18);
 }
 
-.identity-persona-emoji {
-    font-size: 2rem;
-    line-height: 1;
+.identity-persona-icon-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
     margin-bottom: 6px;
+    min-height: 2rem;
+}
+
+.identity-persona-elicon {
+    color: #6366f1;
 }
 
 .identity-persona-card h3 {
@@ -6337,14 +7194,56 @@ async function handleExportWord() {
 .dashboard-reminder-bar {
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
-    gap: 8px 12px;
-    padding: 10px 20px;
+    align-items: flex-start;
+    gap: 10px 14px;
+    padding: 12px 20px;
     margin: 0 20px 12px;
     border-radius: var(--radius-lg);
     border: 1px solid #e0e7ff;
     background: linear-gradient(92deg, #eef2ff, #fff);
     font-size: 0.78rem;
+}
+
+.dashboard-reminder-main {
+    flex: 1;
+    min-width: 0;
+    cursor: pointer;
+    border-radius: 10px;
+    padding: 4px 6px;
+    margin: -4px -6px;
+    transition: background 0.15s ease;
+}
+
+.dashboard-reminder-main:hover {
+    background: rgba(255, 255, 255, 0.65);
+}
+
+.dashboard-reminder-count {
+    display: block;
+    font-weight: 700;
+    font-size: 0.92rem;
+    color: #1e1b4b;
+    margin-top: 4px;
+}
+
+.dashboard-reminder-marquee {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+    align-items: center;
+}
+
+.dashboard-reminder-more {
+    font-size: 0.72rem;
+    color: #64748b;
+}
+
+.dashboard-reminder-hint {
+    display: block;
+    margin-top: 6px;
+    font-size: 0.7rem;
+    color: #6366f1;
 }
 
 .dashboard-reminder-label {
@@ -6390,6 +7289,23 @@ async function handleExportWord() {
     border: 1px solid var(--border-light);
     border-radius: var(--radius);
     background: var(--surface-alt);
+}
+
+.reminder-inline-label {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: #374151;
+    margin-bottom: 4px;
+}
+
+.reminder-select {
+    width: 100%;
+    max-width: 280px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 1px solid var(--border-light);
+    background: #fff;
+    font-size: 0.85rem;
 }
 
 .reminder-form-row {
@@ -6447,6 +7363,272 @@ async function handleExportWord() {
     font-size: 0.78rem;
 }
 
+.reminder-alarm-cards {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.reminder-alarm-card {
+    margin: 0;
+}
+
+.reminder-card-title {
+    font-size: 0.95rem;
+    font-weight: 650;
+    color: #0f172a;
+}
+
+.reminder-card-meta {
+    font-size: 0.72rem;
+    color: #64748b;
+    margin-top: 6px;
+    display: block;
+}
+
+.todo-alarm-card {
+    display: flex;
+    gap: 12px;
+    align-items: stretch;
+    padding: 14px 14px 14px 12px;
+    border-radius: 16px;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    background: linear-gradient(145deg, #ffffff 0%, #f8fafc 100%);
+    box-shadow: 0 4px 18px rgba(15, 23, 42, 0.06);
+}
+
+.todo-alarm-card__time {
+    flex-shrink: 0;
+    min-width: 72px;
+    font-size: 1.65rem;
+    font-weight: 750;
+    letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums;
+    color: #0f172a;
+    line-height: 1.1;
+    padding-top: 2px;
+}
+
+.todo-alarm-card__body {
+    flex: 1;
+    min-width: 0;
+}
+
+.todo-alarm-card__head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.todo-mode-tag {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    background: #e2e8f0;
+    color: #475569;
+}
+
+.todo-mode-tag--daily {
+    background: #d1fae5;
+    color: #047857;
+}
+
+.todo-mode-tag--workday {
+    background: #fef3c7;
+    color: #b45309;
+}
+
+.todo-mode-tag--custom {
+    background: #e0e7ff;
+    color: #4338ca;
+}
+
+.todo-drawer-status-tag {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    background: #e2e8f0;
+    color: #475569;
+}
+
+.todo-drawer-status-tag--pending {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.todo-drawer-status-tag--notified {
+    background: #ffedd5;
+    color: #c2410c;
+}
+
+.todo-drawer-status-tag--done {
+    background: #d1fae5;
+    color: #047857;
+}
+
+.todo-drawer-item--card.todo-alarm-card {
+    box-shadow: 0 8px 28px rgba(15, 23, 42, 0.09);
+    border-color: rgba(15, 23, 42, 0.06);
+}
+
+.reminder-custom-days {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+}
+
+.reminder-weekday-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+}
+
+.reminder-weekday-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.82rem;
+    color: #334155;
+    cursor: pointer;
+    user-select: none;
+}
+
+.reminders-board-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+}
+
+.reminders-board-tab {
+    border: 1px solid #e2e8f0;
+    background: #f8fafc;
+    color: #475569;
+    padding: 8px 14px;
+    border-radius: 999px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.reminders-board-tab--active {
+    background: #eff6ff;
+    border-color: #93c5fd;
+    color: #1e40af;
+}
+
+.reminders-board-tab-count {
+    font-size: 0.72rem;
+    font-weight: 700;
+    opacity: 0.85;
+}
+
+.reminder-board-cards {
+    gap: 12px;
+}
+
+.reminder-board-card {
+    flex-wrap: wrap;
+}
+
+.reminder-board-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.chat-history-sidebar-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.chat-history-collapse-btn {
+    flex-shrink: 0;
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    border: 1px solid #e2e8f0;
+    background: #fff;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #475569;
+}
+
+.chat-history-collapse-btn:hover {
+    border-color: #93c5fd;
+    color: #1d4ed8;
+    background: #eff6ff;
+}
+
+.chat-new-session-btn--toolbar {
+    flex: 1;
+    min-width: 0;
+}
+
+.chat-history-resizer {
+    width: 6px;
+    flex-shrink: 0;
+    cursor: col-resize;
+    background: transparent;
+    align-self: stretch;
+    position: relative;
+}
+
+.chat-history-resizer:hover {
+    background: rgba(59, 130, 246, 0.12);
+}
+
+.chat-history-expand-rail {
+    flex-shrink: 0;
+    width: 36px;
+    align-self: stretch;
+    min-height: 120px;
+    border: none;
+    border-right: 1px solid #e2e8f0;
+    background: #fff;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #64748b;
+    padding: 0;
+}
+
+.chat-history-expand-rail:hover {
+    background: #f1f5f9;
+    color: #1d4ed8;
+}
+
+.todo-snooze-inner {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.todo-snooze-btn {
+    font-weight: 650;
+}
+
 .card-like {
     display: flex;
     gap: 14px;
@@ -6492,83 +7674,8 @@ async function handleExportWord() {
     margin: 0.75rem 0 0.25rem;
 }
 
-.template-history-panel {
-    margin-top: 1rem;
-}
-
 .word-upload-input--folder {
     display: none;
-}
-
-.my-templates-panel {
-    margin-top: 16px;
-    padding: 14px 16px;
-    border-radius: var(--radius-lg);
-    border: 1px solid var(--border-light);
-    background: #fff;
-}
-
-.my-templates-head {
-    display: flex;
-    align-items: baseline;
-    gap: 12px;
-    margin-bottom: 10px;
-}
-
-.my-templates-head h4 {
-    margin: 0;
-    font-size: 0.95rem;
-}
-
-.my-templates-hint {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-}
-
-.my-templates-empty {
-    font-size: 0.82rem;
-    color: var(--text-muted);
-    list-style: none;
-    padding: 0;
-    margin: 0;
-}
-
-.my-templates-list {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
-
-.my-templates-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 10px;
-    border-radius: 8px;
-    border: 1px solid #e2e8f0;
-    font-size: 0.82rem;
-}
-
-.my-templates-name {
-    font-weight: 600;
-    flex: 1;
-    min-width: 120px;
-}
-
-.my-templates-meta {
-    font-size: 0.72rem;
-    color: #94a3b8;
-}
-
-.my-templates-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-left: auto;
 }
 
 .ppt-workbench {
@@ -6711,6 +7818,20 @@ async function handleExportWord() {
     line-height: 1;
 }
 
+.webhook-card-icon--ep {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    color: #6366f1;
+}
+
+.webhook-test-btn-inner {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
 .webhook-card-title {
     margin: 0 0 4px;
     font-size: 1.05rem;
@@ -6769,53 +7890,57 @@ async function handleExportWord() {
     align-items: center;
 }
 
-.api-whisper-asr-card {
-    margin-bottom: 20px;
+/** API 配置页：统一卡片表面（与旧 ASR 卡一致；模型列表与隐藏 ASR 共用） */
+.api-config-panel-card {
     padding: 18px 18px 16px;
     border-radius: var(--radius-lg);
     border: 1px solid #c7d2fe;
     background: linear-gradient(165deg, #f8fafc 0%, #eef2ff 100%);
 }
 
-.api-whisper-asr-title {
+.api-config-panel-title {
     margin: 0 0 8px;
     font-size: 1.05rem;
     font-weight: 700;
     color: #1e293b;
 }
 
-.api-whisper-asr-desc {
+.api-config-panel-desc {
     margin: 0 0 14px;
     font-size: 0.82rem;
     color: #475569;
     line-height: 1.55;
 }
 
-.api-whisper-asr-grid {
+.api-config-panel-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 14px;
 }
 
 @media (max-width: 768px) {
-    .api-whisper-asr-grid {
+    .api-config-panel-grid {
         grid-template-columns: 1fr;
     }
 }
 
-.api-whisper-asr-field {
+.api-config-panel-field {
     display: flex;
     flex-direction: column;
     gap: 6px;
 }
 
-.api-whisper-asr-label {
+.api-config-panel-field--full {
+    grid-column: 1 / -1;
+}
+
+.api-config-panel-label {
     font-size: 0.78rem;
     font-weight: 600;
     color: #334155;
 }
 
-.api-whisper-asr-input {
+.api-config-panel-input {
     width: 100%;
     box-sizing: border-box;
     padding: 10px 12px;
@@ -6823,9 +7948,15 @@ async function handleExportWord() {
     border: 1px solid var(--border);
     font-size: 0.85rem;
     font-family: var(--font-sans, system-ui, sans-serif);
+    background: #fff;
 }
 
-.api-whisper-asr-actions {
+.api-config-panel-input--inline {
+    width: auto;
+    min-width: 88px;
+}
+
+.api-config-panel-actions {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
@@ -6833,11 +7964,40 @@ async function handleExportWord() {
     margin-top: 14px;
 }
 
-.api-whisper-asr-note {
+.api-config-panel-note {
     font-size: 0.75rem;
     color: #64748b;
     line-height: 1.45;
     max-width: 520px;
+}
+
+.api-config-panel-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    width: 100%;
+}
+
+.api-config-panel-head-icon {
+    flex-shrink: 0;
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(99, 102, 241, 0.14);
+    color: #4338ca;
+}
+
+.api-config-panel-head-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.api-config-panel-head.mcc-head .toggle-switch {
+    margin-left: auto;
+    flex-shrink: 0;
 }
 
 .model-config-status,
@@ -6860,20 +8020,15 @@ async function handleExportWord() {
 }
 
 .model-config-card {
-    background: linear-gradient(165deg, #ffffff 0%, #faf9f7 100%);
-    border: 1px solid var(--border-light);
-    border-radius: var(--radius-lg);
-    padding: 16px;
-    box-shadow: var(--shadow-sm);
     display: flex;
     flex-direction: column;
     gap: 12px;
-    transition: var(--transition);
+    transition: border-color 0.18s ease, box-shadow 0.18s ease;
 }
 
 .model-config-card:hover {
-    border-color: #c7d2fe;
-    box-shadow: var(--shadow-md);
+    border-color: #a5b4fc;
+    box-shadow: 0 10px 28px rgba(79, 70, 229, 0.12);
 }
 
 .model-config-card.is-off {
@@ -6885,6 +8040,16 @@ async function handleExportWord() {
     justify-content: space-between;
     align-items: flex-start;
     gap: 10px;
+}
+
+.api-config-panel-head.mcc-head {
+    align-items: center;
+}
+
+.mcc-k--ico {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
 }
 
 .mcc-title {
@@ -6955,9 +8120,9 @@ async function handleExportWord() {
     padding: 28px 16px;
     color: var(--text-muted);
     font-size: 0.88rem;
-    border: 1px dashed var(--border);
+    border: 1px solid #c7d2fe;
     border-radius: var(--radius-lg);
-    background: var(--surface-alt);
+    background: linear-gradient(165deg, #f8fafc 0%, #eef2ff 100%);
 }
 
 .model-config-modal {
@@ -7575,16 +8740,17 @@ async function handleExportWord() {
 
 .todo-drawer-item {
     display: flex;
-    gap: 10px;
+    gap: 12px;
     align-items: flex-start;
-    padding: 12px;
-    border-radius: 10px;
-    border: 1px solid #e2e8f0;
-    background: #fafafa;
+    padding: 0;
+    border: none;
+    background: transparent;
+    box-shadow: none;
 }
 
-.todo-drawer-item--done {
+.todo-drawer-item--done.todo-alarm-card {
     opacity: 0.55;
+    filter: grayscale(0.25);
 }
 
 .todo-drawer-item-main {
@@ -7719,12 +8885,28 @@ async function handleExportWord() {
 }
 
 .chat-history-meta {
+    max-width: calc(100% - 28px);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    font-size: 0.68rem;
+    color: #64748b;
+}
+
+.chat-history-meta-line {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 0.68rem;
-    color: #64748b;
+}
+
+.chat-history-meta-ico {
+    flex-shrink: 0;
+    color: #6366f1;
 }
 
 .chat-history-delete {
@@ -7739,6 +8921,10 @@ async function handleExportWord() {
     font-size: 0.85rem;
     padding: 4px;
     line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #94a3b8;
 }
 
 .chat-history-item:hover .chat-history-delete {
@@ -7842,6 +9028,10 @@ async function handleExportWord() {
     display: inline-flex;
     align-items: center;
     gap: 4px;
+}
+
+.chat-gemini-pill-ico {
+    flex-shrink: 0;
 }
 
 .chat-gemini-pill-x {
@@ -8067,9 +9257,9 @@ async function handleExportWord() {
 .paper-tab-empty {
     display: flex;
     justify-content: center;
-    align-items: center;
-    min-height: min(52vh, 520px);
-    padding: 20px 16px 32px;
+    align-items: flex-start;
+    min-height: 0;
+    padding: 12px 16px 20px;
 }
 
 .paper-empty-hint {
@@ -8217,6 +9407,13 @@ async function handleExportWord() {
     resize: vertical;
     min-height: 64px;
     font-family: var(--font-sans, system-ui, sans-serif);
+}
+
+.btn-ico-text {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
 }
 
 .impression-emotion-entry-btn {
@@ -8465,6 +9662,19 @@ async function handleExportWord() {
     padding-bottom: 48px;
 }
 
+.lib-folder-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.lib-folder-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-right: 10px;
+}
+
 .library-hero {
     display: flex;
     justify-content: space-between;
@@ -8706,6 +9916,10 @@ async function handleExportWord() {
     flex: 0 0 auto;
 }
 
+.library-file-icon--ep {
+    color: #64748b;
+}
+
 .library-file-main {
     flex: 1;
     min-width: 0;
@@ -8716,6 +9930,35 @@ async function handleExportWord() {
     gap: 8px;
     align-items: center;
     margin-bottom: 6px;
+    flex-wrap: wrap;
+}
+
+.library-file-title strong {
+    flex: 1;
+    min-width: 0;
+}
+
+.library-rename-ico {
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    padding: 0 4px;
+    font-size: 0.82rem;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #94a3b8;
+    opacity: 0.65;
+}
+
+.library-rename-ico:hover {
+    opacity: 1;
+}
+
+.library-file-title .library-rename-input {
+    flex: 1 1 100%;
+    min-width: 0;
 }
 
 .library-file-title span {
@@ -9637,26 +10880,6 @@ async function handleExportWord() {
     }
 }
 
-.demo-reset-link {
-    display: block;
-    margin-top: 6px;
-    padding: 0;
-    border: none;
-    background: none;
-    cursor: pointer;
-    font-size: 0.65rem;
-    letter-spacing: 0.02em;
-    color: #94a3b8;
-    opacity: 0.55;
-    text-decoration: underline;
-    text-underline-offset: 2px;
-}
-
-.demo-reset-link:hover {
-    color: #64748b;
-    opacity: 0.95;
-}
-
 .stat-subhint {
     margin-top: 4px;
     font-size: 0.68rem;
@@ -9688,6 +10911,10 @@ async function handleExportWord() {
     transition: background 0.15s ease, border-color 0.15s ease;
 }
 
+.chat-like-ico {
+    flex-shrink: 0;
+}
+
 .chat-like-btn:hover:not(:disabled) {
     border-color: #93c5fd;
     background: #eff6ff;
@@ -9697,6 +10924,134 @@ async function handleExportWord() {
 .chat-like-btn:disabled {
     opacity: 0.45;
     cursor: not-allowed;
+}
+
+.chat-like-btn--on {
+    border-color: #a855f7 !important;
+    background: linear-gradient(135deg, #f5f3ff 0%, #ede9fe 100%) !important;
+    color: #5b21b6 !important;
+    box-shadow: 0 0 0 1px rgba(168, 85, 247, 0.2);
+}
+
+.chat-pack-skill-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    font-size: 0.78rem;
+    border-radius: 8px;
+    border: 1px solid #fde68a;
+    background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+    color: #92400e;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.chat-pack-skill-btn:hover:not(:disabled) {
+    border-color: #fbbf24;
+    background: #fff7ed;
+}
+
+.chat-pack-skill-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.stat-card--ratings-trend {
+    flex: 1 1 280px;
+    min-width: 240px;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.stat-ratings-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    width: 100%;
+}
+
+.stat-ratings-head-icon {
+    width: 52px;
+    min-height: 44px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.stat-ratings-head-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.stat-ratings-chart-area {
+    width: 100%;
+    min-height: 132px;
+}
+
+.stat-ratings-chart-el {
+    width: 100%;
+    height: 132px;
+}
+
+.stat-ratings-empty {
+    width: 100%;
+    min-height: 120px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 12px;
+    font-size: 0.78rem;
+    color: #64748b;
+    background: #f8fafc;
+    border-radius: 12px;
+    border: 1px dashed #e2e8f0;
+}
+
+/* DeepSeek / R1 风格：<think> → details（正文内在 Markdown 流程中注入） */
+.markdown-body :deep(.deep-think-box) {
+    margin: 10px 0;
+    border-radius: 12px;
+    border: 1px solid #e2e8f0;
+    background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+}
+
+.markdown-body :deep(.deep-think-box > summary) {
+    cursor: pointer;
+    list-style: none;
+    padding: 10px 14px;
+    font-size: 0.8rem;
+    font-weight: 650;
+    color: #475569;
+    user-select: none;
+}
+
+.markdown-body :deep(.deep-think-box > summary::-webkit-details-marker) {
+    display: none;
+}
+
+.markdown-body :deep(.think-content) {
+    padding: 0 14px 12px;
+}
+
+.markdown-body :deep(.think-pre) {
+    margin: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+    font-size: 0.72rem;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: #475569;
+    background: rgba(255, 255, 255, 0.75);
+    border-radius: 8px;
+    padding: 10px 12px;
+    border: 1px solid #e2e8f0;
 }
 
 .chat-like-label {

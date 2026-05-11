@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { useUserStore } from '../store/user.js'
 import LoginView from '../views/LoginView.vue'
 import WorkspaceLayout from '../layouts/WorkspaceLayout.vue'
@@ -60,6 +61,7 @@ const router = createRouter({
 router.beforeEach((to, _from, next) => {
   const store = useUserStore()
   if (to.meta.requiresAuth && !store.user) {
+    ElMessage.warning('请先登录或注册，以使用完整功能')
     next({ name: 'login' })
     return
   }

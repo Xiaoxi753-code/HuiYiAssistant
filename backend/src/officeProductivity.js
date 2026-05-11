@@ -5,7 +5,7 @@ import {
   extractTextFromResponse,
   withThinkingParams,
   normalizeModelId,
-  transcribeAudioWithWhisper,
+  MEETING_MINUTES_TASK_EXTRACTION_BLOCK,
 } from './services/openclawService.js';
 
 /**
@@ -37,21 +37,135 @@ export async function llmCompletePlain(modelConfig, system, user, temperature = 
 }
 
 /**
- * 使用独立 Whisper 客户端对本地音频文件做真实转写（与对话模型 base_url 分离）。
- * @param {import('./services/openclawService.js').ModelCallConfig} modelConfig
- * @param {string} absPath 磁盘绝对路径
- * @param {string} [originalFilename]
- * @param {{ whisperApiKey?: string, whisperBaseUrl?: string }} [whisperOpts] 来自前端 multipart 字段
+ * 将模型输出的 remind_time / remind_at 规范为 SQLite 可用的短字符串（≤40），默认本地墙钟时间。
+ * 说明：相对汉语时间（如「明日下午」）主要由模型在 Prompt 中结合「当前时间参考」先换算为绝对时间串，本函数只做解析与兜底。
+ * @param {unknown} raw
+ * @param {Date} [refDate]
+ * @returns {string}
  */
-export async function transcribeMeetingAudioFile(modelConfig, absPath, originalFilename, whisperOpts = {}) {
-  const buf = fs.readFileSync(absPath);
-  const name = originalFilename || path.basename(absPath) || 'recording.webm';
-  return transcribeAudioWithWhisper(modelConfig, buf, name, whisperOpts);
+export function normalizeRemindForTodoDb(raw, refDate = new Date()) {
+  const s = String(raw ?? '')
+    .trim()
+    .replace(/\u00a0/g, ' ');
+  if (!s) {
+    return formatLocalCompact(refDate);
+  }
+  const isoTry = Date.parse(s);
+  if (!Number.isNaN(isoTry)) {
+    return formatLocalCompact(new Date(isoTry));
+  }
+  const m = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (m) {
+    const y = Number(m[1]);
+    const mo = Number(m[2]) - 1;
+    const d = Number(m[3]);
+    const hh = m[4] != null ? Number(m[4]) : 9;
+    const mm = m[5] != null ? Number(m[5]) : 0;
+    const dt = new Date(y, mo, d, hh, mm);
+    if (!Number.isNaN(dt.getTime())) {
+      return formatLocalCompact(dt);
+    }
+  }
+  return formatLocalCompact(refDate);
+}
+
+function formatLocalCompact(d) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/**
+ * 从纪要模型全文解析 Markdown 与结构化任务 JSON（容错）
+ * @returns {{ markdown: string, tasks: object[] }}
+ */
+export function parseMeetingMinutesModelOutput(fullText) {
+  const s = String(fullText || '').trim();
+  const marker = '---STRUCTURED_TASKS_JSON---';
+  let md = s;
+  let jsonSlice = '';
+  const idx = s.indexOf(marker);
+  if (idx !== -1) {
+    md = s.slice(0, idx).trim();
+    jsonSlice = s.slice(idx + marker.length).trim();
+  } else {
+    const re = /```(?:json)?\s*([\s\S]*?)```/gi;
+    let last = null;
+    let m;
+    while ((m = re.exec(s)) !== null) {
+      last = m;
+    }
+    if (last) {
+      jsonSlice = last[1].trim();
+      md = s.slice(0, last.index).trim();
+    }
+  }
+  const tasks = safeParseMeetingTasksJsonArray(jsonSlice);
+  return { markdown: md || s, tasks };
+}
+
+function safeParseMeetingTasksJsonArray(jsonSlice) {
+  const str = String(jsonSlice || '').trim();
+  if (!str) {
+    return [];
+  }
+  const tryParse = (t) => {
+    try {
+      const v = JSON.parse(t);
+      return Array.isArray(v) ? v : [];
+    } catch {
+      return null;
+    }
+  };
+  let arr = tryParse(str);
+  if (!arr) {
+    const bracket = str.match(/\[[\s\S]*\]/);
+    if (bracket) {
+      arr = tryParse(bracket[0]);
+    }
+  }
+  if (!arr) {
+    return [];
+  }
+  return arr.filter((x) => x && typeof x === 'object' && (String(x.content || x.title || '').trim()));
+}
+
+/**
+ * 将 Agent 任务 JSON 写入 todos（status=pending）
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {string} userEmail
+ * @param {object[]} agentTasks
+ * @param {string} source
+ * @param {Date} [refDate]
+ * @returns {number}
+ */
+export function insertTodoRowsFromAgentTaskList(db, userEmail, agentTasks, source, refDate = new Date()) {
+  const now = refDate;
+  const items = (Array.isArray(agentTasks) ? agentTasks : []).map((t) => {
+    const title = String(t?.content ?? t?.title ?? '').trim().slice(0, 500);
+    const remindAt = normalizeRemindForTodoDb(t?.remind_time ?? t?.remind_at, now);
+    const parts = [];
+    const asg = String(t?.assignee ?? t?.负责人 ?? '').trim();
+    const loc = String(t?.location ?? t?.地点 ?? '').trim();
+    if (asg) {
+      parts.push(`负责人：${asg}`);
+    }
+    if (loc) {
+      parts.push(`地点：${loc}`);
+    }
+    let notes = parts.join('；');
+    const extra = String(t?.notes ?? '').trim();
+    if (extra) {
+      notes = notes ? `${notes}；${extra}` : extra;
+    }
+    return { title, remind_at: remindAt, notes: notes.slice(0, 2000) };
+  });
+  return insertTodoRows(db, userEmail, items, source);
 }
 
 /**
  * @param {import('./services/openclawService.js').ModelCallConfig} modelConfig
  * @param {string} transcript
+ * @returns {Promise<{ markdown: string, tasks: object[] }>}
  */
 export async function generateMeetingMinutesMarkdown(modelConfig, transcript) {
   const system = `你是一个金牌会议秘书。请将用户给出的会议录音转写文本，严格按照以下三个模块进行结构化输出（使用 Markdown，二级标题必须一字不差）：
@@ -64,9 +178,13 @@ export async function generateMeetingMinutesMarkdown(modelConfig, transcript) {
 - 「议题背景」用 2–5 条要点概括上下文与讨论范围。
 - 「核心结论」用条目列出已对齐的结论；不得编造逐字稿中未出现的硬事实；不确定处标注「待确认」。
 - 「待办事项（负责人+时间）」每条使用 Markdown 任务列表「- [ ] 」，同一行内写清责任人与时间点（若逐字稿中缺失则写「待指派｜时间待确认」）。
-- 不要输出与以上三模块无关的大段开场白。`;
-  const user = `【会议转写文本】\n${String(transcript || '').trim().slice(0, 24000)}`;
-  return llmCompletePlain(modelConfig, system, user, 0.25);
+- 不要输出与以上三模块无关的大段开场白。
+
+${MEETING_MINUTES_TASK_EXTRACTION_BLOCK}`;
+  const nowRef = `【当前时间参考】ISO8601：${new Date().toISOString()}；中国本地（东八区常用表述基准）：${new Date().toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' })}`;
+  const user = `${nowRef}\n\n【会议转写文本】\n${String(transcript || '').trim().slice(0, 24000)}`;
+  const raw = await llmCompletePlain(modelConfig, system, user, 0.25);
+  return parseMeetingMinutesModelOutput(raw);
 }
 
 function stripJsonFence(raw) {
@@ -127,8 +245,8 @@ export function insertTodoRows(db, userEmail, items, source) {
     return 0;
   }
   const stmt = db.prepare(
-    `INSERT INTO todos (user_email, title, remind_at, notes, source, done)
-     VALUES (?, ?, ?, ?, ?, 0)`,
+    `INSERT INTO todos (user_email, title, remind_at, notes, source, done, repeat_mode, status)
+     VALUES (?, ?, ?, ?, ?, 0, 'once', 'pending')`,
   );
   let n = 0;
   for (const it of items) {

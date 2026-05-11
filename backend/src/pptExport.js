@@ -10,7 +10,7 @@ export async function markdownToPptxBuffer(markdown, deckTitleFallback = '演示
   const md = String(markdown || '').trim();
   const pptx = new PptxGenJS();
   pptx.layout = 'LAYOUT_WIDE';
-  pptx.author = 'OpenClaw';
+  pptx.author = '会意助手';
 
   const lines = md.split(/\r?\n/);
   let deckTitle = deckTitleFallback;
@@ -66,7 +66,7 @@ export async function markdownToPptxBuffer(markdown, deckTitleFallback = '演示
     color: '1e293b',
     align: 'center',
   });
-  titleSlide.addText('由 OpenClaw 自 Markdown 提纲生成', {
+    titleSlide.addText('由会意助手自 Markdown 提纲生成', {
     x: 0.5,
     y: 4,
     w: 12.5,

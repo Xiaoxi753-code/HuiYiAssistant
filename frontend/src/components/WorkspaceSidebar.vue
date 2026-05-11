@@ -1,7 +1,34 @@
 <script setup>
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage, ElIcon } from 'element-plus'
+import 'element-plus/es/components/icon/style/css'
+import {
+  Bell,
+  ChatDotRound,
+  DArrowLeft,
+  DArrowRight,
+  DataBoard,
+  Document,
+  FolderOpened,
+  DocumentCopy,
+  Link,
+  Setting,
+  Star,
+  Switch,
+  SwitchButton,
+  TrendCharts,
+  Trophy,
+} from '@element-plus/icons-vue'
 import { useUserStore } from '../store/user.js'
+
+defineProps({
+  collapsed: {
+    type: Boolean,
+    default: false,
+  },
+})
+
+const emit = defineEmits(['toggle-collapse'])
 
 const route = useRoute()
 const router = useRouter()
@@ -57,95 +84,115 @@ function handleLogout() {
   router.push('/login')
 }
 
-async function confirmDemoPresentationReset() {
-  const email = userStore.user?.email
-  if (!email) {
-    ElMessage.warning('请先登录后再使用演示重置')
-    return
-  }
-  try {
-    await ElMessageBox.confirm(
-      '将清空当前对话与服务器上的「眼中的你」画像缓存（Skill 库保留）。适合答辩反复演示。',
-      '演示重置',
-      { confirmButtonText: '重置', cancelButtonText: '取消', type: 'warning' },
-    )
-  } catch {
-    return
-  }
-  try {
-    const r = await fetch('/api/user/demo-reset', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email }),
-    })
-    let data = {}
-    try {
-      data = await r.json()
-    } catch {
-      data = {}
-    }
-    if (!r.ok || !data.success) {
-      throw new Error(data.message || `HTTP ${r.status}`)
-    }
-    ElMessage.success('演示状态已重置')
-    void router.push({ name: 'dashboard', query: { tab: 'overview' } })
-  } catch (e) {
-    ElMessage.error(String(e?.message || e || '重置失败'))
-  }
-}
 </script>
 
 <template>
-  <aside class="sidebar" :class="{ 'sidebar--warm': isCompanionWarmNav() }">
+  <aside class="sidebar" :class="{ 'sidebar--warm': isCompanionWarmNav(), 'sidebar--collapsed': collapsed }">
     <div class="sidebar-header">
-      <div class="logo-icon-sm">OC</div>
-      <span class="logo-text">OpenClaw</span>
+      <button
+        type="button"
+        class="sidebar-collapse-btn"
+        :title="collapsed ? '展开侧栏' : '收起侧栏'"
+        :aria-expanded="!collapsed"
+        @click="emit('toggle-collapse')"
+      >
+        <el-icon :size="18">
+          <DArrowLeft v-if="!collapsed" />
+          <DArrowRight v-else />
+        </el-icon>
+      </button>
+      <div class="logo-icon-sm">会</div>
+      <span class="logo-text">会意助手</span>
     </div>
     <nav class="sidebar-nav">
       <div class="nav-section">主菜单</div>
       <button type="button" class="nav-item" :class="{ active: isDashTab('overview') }" @click="goDashboardTab('overview')">
-        <span class="nav-item-icon-text">&#9681;</span> <span>工作台概览</span>
+        <span class="nav-item-inner">
+          <el-icon class="nav-item-icon" :size="18"><DataBoard /></el-icon>
+          <span>工作台概览</span>
+        </span>
       </button>
       <button type="button" class="nav-item" :class="{ active: isDashTab('chat') }" @click="goDashboardTab('chat')">
-        <span class="nav-item-icon-text">&#9654;</span> <span>对话助手</span><span class="nav-badge hot">NEW</span>
+        <span class="nav-item-inner">
+          <el-icon class="nav-item-icon" :size="18"><ChatDotRound /></el-icon>
+          <span>对话助手</span>
+          <span class="nav-badge hot">NEW</span>
+        </span>
       </button>
       <button type="button" class="nav-item" :class="{ active: route.name === 'skills' }" @click="goSkills">
-        <span class="nav-item-icon-text">&#10022;</span> <span>技能广场</span>
+        <span class="nav-item-inner">
+          <el-icon class="nav-item-icon" :size="18"><Trophy /></el-icon>
+          <span>技能广场</span>
+        </span>
       </button>
       <button type="button" class="nav-item" :class="{ active: isDashTab('templates') }" @click="goDashboardTab('templates')">
-        <span class="nav-item-icon-text">&#9638;</span> <span>智能模板引擎</span><span class="nav-badge hot">HOT</span>
+        <span class="nav-item-inner">
+          <el-icon class="nav-item-icon" :size="18"><DocumentCopy /></el-icon>
+          <span>智能模板引擎</span>
+          <span class="nav-badge hot">HOT</span>
+        </span>
       </button>
       <button type="button" class="nav-item" :class="{ active: isDashTab('library') }" @click="goDashboardTab('library')">
-        <span class="nav-item-icon-text">&#128193;</span> <span>个人资料库</span>
+        <span class="nav-item-inner">
+          <el-icon class="nav-item-icon" :size="18"><FolderOpened /></el-icon>
+          <span>个人资料库</span>
+        </span>
       </button>
-      <button type="button" class="nav-item" :class="{ active: isDashTab('meeting') }" @click="goDashboardTab('meeting')">
-        <span class="nav-item-icon-text">&#9679;</span> <span>智能会议纪要</span>
+      <button v-if="false" type="button" class="nav-item" :class="{ active: isDashTab('meeting') }" @click="goDashboardTab('meeting')">
+        <span class="nav-item-inner">
+          <el-icon class="nav-item-icon" :size="18"><Document /></el-icon>
+          <span>智能会议纪要</span>
+        </span>
       </button>
       <button type="button" class="nav-item" :class="{ active: isDashTab('paper') }" @click="goDashboardTab('paper')">
-        <span class="nav-item-icon-text">&#9633;</span> <span>文献论文摘要</span>
+        <span class="nav-item-inner">
+          <el-icon class="nav-item-icon" :size="18"><Document /></el-icon>
+          <span>文献论文摘要</span>
+        </span>
       </button>
-      <button type="button" class="nav-item" :class="{ active: isDashTab('ppt') }" @click="goDashboardTab('ppt')">
-        <span class="nav-item-icon-text">&#9650;</span> <span>PPT大纲生成</span>
+      <button v-if="false" type="button" class="nav-item" :class="{ active: isDashTab('ppt') }" @click="goDashboardTab('ppt')">
+        <span class="nav-item-inner">
+          <el-icon class="nav-item-icon" :size="18"><Document /></el-icon>
+          <span>PPT大纲生成</span>
+        </span>
       </button>
       <div class="nav-section">更多</div>
       <button type="button" class="nav-item" :class="{ active: isDashTab('companion') }" @click="goDashboardTab('companion')">
-        <span class="nav-item-icon-text">&#9825;</span> <span>情感陪伴对话</span>
+        <span class="nav-item-inner">
+          <el-icon class="nav-item-icon" :size="18"><Star /></el-icon>
+          <span>情感陪伴对话</span>
+        </span>
       </button>
       <button type="button" class="nav-item" :class="{ active: route.name === 'growth' }" @click="goGrowth">
-        <span class="nav-item-icon-text" aria-hidden="true">&#128202;</span> <span>情绪与成长看板</span>
+        <span class="nav-item-inner">
+          <el-icon class="nav-item-icon" :size="18" aria-hidden="true"><TrendCharts /></el-icon>
+          <span>情绪与成长看板</span>
+        </span>
       </button>
       <button type="button" class="nav-item" :class="{ active: isDashTab('identity') }" @click="goDashboardTab('identity')">
-        <span class="nav-item-icon-text">&#8644;</span> <span>多身份切换</span>
+        <span class="nav-item-inner">
+          <el-icon class="nav-item-icon" :size="18"><Switch /></el-icon>
+          <span>多身份切换</span>
+        </span>
       </button>
       <button type="button" class="nav-item" :class="{ active: isDashTab('reminders') }" @click="goDashboardTab('reminders')">
-        <span class="nav-item-icon-text">&#9200;</span> <span>主动提醒推送</span>
+        <span class="nav-item-inner">
+          <el-icon class="nav-item-icon" :size="18"><Bell /></el-icon>
+          <span>主动提醒推送</span>
+        </span>
       </button>
       <div class="nav-section">设置</div>
       <button type="button" class="nav-item" :class="{ active: isDashTab('apiConfig') }" @click="goDashboardTab('apiConfig')">
-        <span class="nav-item-icon-text">&#9881;</span> <span>API &amp; 模型配置</span>
+        <span class="nav-item-inner">
+          <el-icon class="nav-item-icon" :size="18"><Setting /></el-icon>
+          <span>API &amp; 模型配置</span>
+        </span>
       </button>
       <button type="button" class="nav-item" :class="{ active: isDashTab('webhookConfig') }" @click="goDashboardTab('webhookConfig')">
-        <span class="nav-item-icon-text" aria-hidden="true">&#128276;</span> <span>外联推送配置</span>
+        <span class="nav-item-inner">
+          <el-icon class="nav-item-icon" :size="18" aria-hidden="true"><Link /></el-icon>
+          <span>外联推送配置</span>
+        </span>
       </button>
     </nav>
     <div class="sidebar-footer">
@@ -153,19 +200,54 @@ async function confirmDemoPresentationReset() {
       <div class="user-info">
         <div class="user-name" id="sidebarUserName">{{ userStore.user?.name || '用户' }}</div>
         <div class="user-role">个人版</div>
-        <button
-          v-if="userStore.user?.email"
-          type="button"
-          class="demo-reset-link"
-          title="答辩演示：清空对话并重置画像（Skill 保留）"
-          @click="confirmDemoPresentationReset"
-        >
-          演示重置
-        </button>
       </div>
-      <button type="button" class="btn-ghost" title="退出登录" @click="handleLogout" style="font-size: 1.1rem; font-weight: 700">
-        &#10149;
+      <button type="button" class="btn-ghost sidebar-logout-btn" title="退出登录" @click="handleLogout">
+        <el-icon :size="20"><SwitchButton /></el-icon>
       </button>
     </div>
   </aside>
 </template>
+
+<style scoped>
+.nav-item-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.nav-item-icon {
+  flex-shrink: 0;
+  color: inherit;
+  opacity: 0.92;
+}
+
+.sidebar-logout-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 8px;
+}
+
+.sidebar-collapse-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--border-light, #e5e7eb);
+  border-radius: var(--radius-sm, 8px);
+  background: var(--surface-alt, #f8fafc);
+  color: var(--text-secondary, #475569);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.sidebar-collapse-btn:hover {
+  background: var(--primary-light, #eef2ff);
+  border-color: #c7d2fe;
+  color: var(--primary, #4f46e5);
+}
+</style>

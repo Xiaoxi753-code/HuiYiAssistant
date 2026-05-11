@@ -637,6 +637,34 @@
             font-size: 0.7rem;
             color: var(--text-muted);
         }
+        .sidebar.sidebar--collapsed .sidebar-header {
+            justify-content: center;
+            flex-wrap: wrap;
+            padding-left: 10px;
+            padding-right: 10px;
+            gap: 8px;
+        }
+        .sidebar.sidebar--collapsed .logo-text {
+            display: none;
+        }
+        .sidebar.sidebar--collapsed .sidebar-nav .nav-section {
+            display: none;
+        }
+        .sidebar.sidebar--collapsed .nav-item-inner > span:not(.nav-badge) {
+            display: none !important;
+        }
+        .sidebar.sidebar--collapsed .nav-badge {
+            display: none !important;
+        }
+        .sidebar.sidebar--collapsed .sidebar-footer {
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            gap: 8px;
+        }
+        .sidebar.sidebar--collapsed .sidebar-footer .user-info {
+            display: none;
+        }
         .main-content {
             margin-left: var(--sidebar-width);
             flex: 1;
@@ -868,10 +896,6 @@
             font-weight: 600;
             animation: highlightPulse 2.5s ease-in-out infinite;
         }
-        .template-code-block .token-bracket {
-            color: #94e2d5;
-            font-weight: 600;
-        }
         .template-code-block .token-fill {
             background: rgba(116, 199, 236, 0.2);
             color: #89dceb;
@@ -914,6 +938,13 @@
             font-size: 1.8rem;
             margin-bottom: 6px;
             font-weight: 700;
+            color: var(--primary);
+        }
+        .template-demo-card .demo-icon--ep {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 6px;
             color: var(--primary);
         }
         .template-demo-card .label {
@@ -963,6 +994,56 @@
         .stat-card .stat-label {
             font-size: 0.72rem;
             color: var(--text-muted);
+        }
+
+        /* 数据概览：高密度指标卡（左侧大图标 + 右侧标题/数字/脚注） */
+        .stat-card.stat-card--metric {
+            flex: 1 1 200px;
+            min-width: 200px;
+            align-items: stretch;
+            padding: 14px 16px 12px;
+            gap: 0;
+        }
+        .stat-card--metric .stat-metric-left {
+            width: 52px;
+            min-height: 76px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 14px;
+            flex-shrink: 0;
+        }
+        .stat-card--metric .stat-metric-body {
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            gap: 2px;
+        }
+        .stat-card--metric .stat-metric-label {
+            font-size: 0.78rem;
+            color: var(--text-muted);
+            font-weight: 600;
+            letter-spacing: 0.02em;
+        }
+        .stat-card--metric .stat-metric-value {
+            font-size: 32px;
+            font-weight: 800;
+            line-height: 1.08;
+            color: var(--primary);
+            letter-spacing: -0.03em;
+        }
+        .stat-card--metric .stat-metric-foot {
+            font-size: 0.68rem;
+            color: var(--text-muted);
+            opacity: 0.88;
+            margin-top: 8px;
+            line-height: 1.35;
+        }
+        .stat-card--metric .stat-metric-icon {
+            opacity: 0.92;
         }
 
         /* ========== SECTION HEADER ========== */

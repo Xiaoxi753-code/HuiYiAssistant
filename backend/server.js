@@ -31,17 +31,19 @@ import {
   sanitizeEmotionHistoryArray,
   generateWeeklyGrowthReview,
 } from './src/services/openclawService.js';
-import { parsePdfBuffer, extractPaperTextFromBuffer } from './src/paperExtract.js';
+import { extractPaperTextFromPath, parsePdfBuffer } from './src/paperExtract.js';
 import { createToolExecutor, getOpenClawChatTools } from './tools.js';
 import { runAgentChatToSse } from './src/openclawAgentLoop.js';
 import {
-  transcribeMeetingAudioFile,
   generateMeetingMinutesMarkdown,
   extractTodosJson,
   insertTodoRows,
+  insertTodoRowsFromAgentTaskList,
   generatePptOutlineMarkdown,
-  getMulterMeetingAbsPath,
 } from './src/officeProductivity.js';
+import { attachRealtimeAsrWss } from './src/realtimeAsrBrowserGateway.js';
+import { transcribeUploadedAudioFile } from './src/asrService.js';
+import { DEFAULT_REALTIME_WS, assertSafeDashscopeRealtimeUrl } from './src/asrRealtimeService.js';
 import { markdownToPptxBuffer } from './src/pptExport.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -89,8 +91,8 @@ const tempDir = resolveOptionalPath('OPENCLAW_TEMP_DIR', path.join(dataRoot, 'te
 const dbPath = resolveOptionalPath('OPENCLAW_DB_PATH', path.join(dataRoot, resolveSqliteFileName()));
 const pythonScript = path.join(__dirname, 'py_service', 'convert.py');
 const pythonBin = String(process.env.PYTHON_BIN || (process.platform === 'win32' ? 'python' : 'python3')).trim() || 'python3';
-/** 待办外联推送轮询间隔（默认 30s；仍可由环境变量调节；Webhook 地址存 system_configs） */
-const TODO_PUSH_POLL_MS = Math.min(300000, Math.max(30000, Number.parseInt(String(process.env.TODO_PUSH_POLL_MS || ''), 10) || 30000));
+/** 待办外联推送轮询间隔（默认 10s；仍可由环境变量调节；Webhook 地址存 system_configs） */
+const TODO_PUSH_POLL_MS = Math.min(300000, Math.max(10000, Number.parseInt(String(process.env.TODO_PUSH_POLL_MS || ''), 10) || 10000));
 
 fs.mkdirSync(uploadsDir, { recursive: true });
 fs.mkdirSync(tempDir, { recursive: true });
@@ -328,6 +330,7 @@ function ensureTodosTable() {
         notes TEXT,
         source TEXT,
         done INTEGER NOT NULL DEFAULT 0,
+        repeat_mode TEXT NOT NULL DEFAULT 'once',
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `);
@@ -413,6 +416,56 @@ function ensureTodosPushRetryCountColumn() {
   }
 }
 ensureTodosPushRetryCountColumn();
+
+/** 循环闹钟：单次 / 每天 / 工作日（老库缺列时 ALTER，失败吞掉避免阻断启动） */
+function ensureTodosRepeatModeColumn() {
+  try {
+    const cols = db.prepare('PRAGMA table_info(todos)').all();
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has('repeat_mode')) {
+      try {
+        db.exec(`ALTER TABLE todos ADD COLUMN repeat_mode TEXT DEFAULT 'once'`);
+      } catch (inner) {
+        logger.warn('[db migrate] todos repeat_mode ALTER skipped', inner?.message || inner);
+      }
+    }
+  } catch (e) {
+    logger.error('[db migrate] todos repeat_mode', e);
+  }
+}
+ensureTodosRepeatModeColumn();
+
+/** 自定义工作日重复：JSON 数组，1–7 表示周一至周日 */
+function ensureTodosRepeatCustomDaysColumn() {
+  try {
+    const cols = db.prepare('PRAGMA table_info(todos)').all();
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has('repeat_custom_days')) {
+      db.exec(`ALTER TABLE todos ADD COLUMN repeat_custom_days TEXT DEFAULT '[]'`);
+    }
+  } catch (e) {
+    logger.error('[db migrate] todos repeat_custom_days', e);
+  }
+}
+ensureTodosRepeatCustomDaysColumn();
+
+/** AI 回复点赞 / 评分（用于工作台趋势图） */
+function ensureAiRatingsTable() {
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS ai_ratings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        score INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_ai_ratings_created ON ai_ratings (created_at);');
+  } catch (e) {
+    logger.error('[db migrate] ai_ratings', e);
+    throw e;
+  }
+}
+ensureAiRatingsTable();
 
 /** 强一致键名（INSERT OR REPLACE）；旧键仅用于读取兼容 */
 const WEBHOOK_KEY_WECOM = 'wecom_webhook';
@@ -1183,25 +1236,6 @@ function getMulterAbsPath(file) {
  * 会误判为“调试模式”并同步读取 cwd 下 ./test/data/05-versions-space.pdf（幽灵路径）。
  * 必须只加载 lib 入口，且仅传入 Buffer。
  */
-async function extractPaperTextFromPath(absPath, ext) {
-  const normalized = path.resolve(path.normalize(String(absPath || '')));
-  if (!normalized || !fs.existsSync(normalized)) {
-    throw new Error('文件不存在或路径无效');
-  }
-  const buf = await fs.promises.readFile(normalized);
-  const buffer = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
-  if (buffer.length === 0) {
-    throw new Error('文件为空');
-  }
-  const text = await extractPaperTextFromBuffer(buffer, ext);
-  if (ext === '.pdf') {
-    logger.info('[PDF CONTENT EXTRACTED] 字数:', text.length);
-  } else {
-    logger.info('[DOCX CONTENT EXTRACTED] 字数:', text.length);
-  }
-  return text;
-}
-
 function seedModelConfigsIfEmpty() {
   const { c } = db.prepare('SELECT COUNT(*) AS c FROM model_configs').get();
   if (c > 0) {
@@ -1226,11 +1260,35 @@ function seedModelConfigsIfEmpty() {
 
 seedModelConfigsIfEmpty();
 
+/**
+ * Multer 在部分环境下把 UTF-8 文件名误作 latin1，导致中文乱码。
+ * 仅在「latin1→utf8 后出现汉字且原文件名不含中日韩等字符」时采用修复结果，避免破坏已为 UTF-8 的名称。
+ */
+function normalizeMulterOriginalName(name) {
+  if (name == null || name === '') {
+    return name;
+  }
+  const s = String(name);
+  if (/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u3000-\u303f\uff00-\uffef]/.test(s)) {
+    return s;
+  }
+  try {
+    const fixed = Buffer.from(s, 'latin1').toString('utf8');
+    if (fixed && fixed !== s && /[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(fixed)) {
+      return fixed;
+    }
+  } catch {
+    /* ignore */
+  }
+  return s;
+}
+
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => {
     cb(null, uploadsDir);
   },
   filename: (_req, file, cb) => {
+    file.originalname = normalizeMulterOriginalName(file.originalname);
     const originalName = path.basename(file.originalname || 'template.docx');
     const safeName = `${Date.now()}-${crypto.randomUUID()}-${originalName}`;
     cb(null, safeName);
@@ -1240,6 +1298,7 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage,
   fileFilter: (_req, file, cb) => {
+    file.originalname = normalizeMulterOriginalName(file.originalname);
     const ext = path.extname(file.originalname || '').toLowerCase();
     if (ext === '.docx') {
       cb(null, true);
@@ -1253,12 +1312,13 @@ const upload = multer({
 const paperUpload = multer({
   storage,
   fileFilter: (_req, file, cb) => {
+    file.originalname = normalizeMulterOriginalName(file.originalname);
     const ext = path.extname(file.originalname || '').toLowerCase();
-    if (ext === '.pdf' || ext === '.docx') {
+    if (ext === '.pdf' || ext === '.docx' || ext === '.doc') {
       cb(null, true);
       return;
     }
-    cb(new Error('仅支持 .pdf 或 .docx'));
+    cb(new Error('仅支持 .pdf、.doc、.docx'));
   },
   limits: { fileSize: 25 * 1024 * 1024 },
 });
@@ -1267,54 +1327,68 @@ const paperUpload = multer({
 const libraryUpload = multer({
   storage,
   fileFilter: (_req, file, cb) => {
+    file.originalname = normalizeMulterOriginalName(file.originalname);
     const ext = path.extname(file.originalname || '').toLowerCase();
-    if (['.pdf', '.docx', '.txt', '.md'].includes(ext)) {
+    if (['.pdf', '.doc', '.docx', '.txt', '.md'].includes(ext)) {
       cb(null, true);
       return;
     }
-    cb(new Error('资料库仅支持 .pdf、.docx、.txt、.md'));
+    cb(new Error('资料库仅支持 .pdf、.doc、.docx、.txt、.md'));
   },
   limits: { fileSize: 30 * 1024 * 1024 },
 });
 
-const meetingAudioUploadDir = path.join(uploadsDir, 'audio');
+const meetingAudioUploadDir = path.join(uploadsDir, 'meeting-audio');
 fs.mkdirSync(meetingAudioUploadDir, { recursive: true });
-
-const meetingAudioStorage = multer.diskStorage({
+const meetingFileStorage = multer.diskStorage({
   destination: (_req, _file, cb) => {
     cb(null, meetingAudioUploadDir);
   },
   filename: (_req, file, cb) => {
+    file.originalname = normalizeMulterOriginalName(file.originalname);
     const originalName = path.basename(file.originalname || 'recording.mp3');
-    const safeName = `${Date.now()}-${crypto.randomUUID()}-${originalName}`;
-    cb(null, safeName);
+    cb(null, `${Date.now()}-${crypto.randomUUID()}-${originalName}`);
   },
 });
-
-/** 会议纪要音频：最大 20MB；仅 mp3 / wav / m4a */
-const meetingAudioUpload = multer({
-  storage: meetingAudioStorage,
+const meetingFileUpload = multer({
+  storage: meetingFileStorage,
   fileFilter: (_req, file, cb) => {
+    file.originalname = normalizeMulterOriginalName(file.originalname);
     const ext = path.extname(file.originalname || '').toLowerCase();
-    if (['.mp3', '.wav', '.m4a', '.webm', '.ogg'].includes(ext)) {
+    if (['.mp3', '.wav', '.m4a'].includes(ext)) {
       cb(null, true);
       return;
     }
-    cb(new Error('仅支持 .mp3、.wav、.m4a、.webm、.ogg 音频'));
+    cb(new Error('仅支持 .mp3、.wav、.m4a'));
   },
-  limits: { fileSize: 20 * 1024 * 1024 },
+  limits: { fileSize: 52 * 1024 * 1024 },
 });
 
+const meetingFileMulterGate = (req, res, next) => {
+  meetingFileUpload.single('file')(req, res, (err) => {
+    if (err) {
+      return res.status(400).json({ success: false, message: String(err.message || err || '上传失败') });
+    }
+    next();
+  });
+};
+
 app.post('/api/auth/register', (req, res) => {
-  const { email, password, name } = req.body;
+  const account = String(req.body.account || req.body.email || '').trim();
+  const password = String(req.body.password || '');
+  const name = String(req.body.name || '').trim();
+  if (!account || !password || !name) {
+    return res.status(400).json({ success: false, message: '请填写账号、密码与用户名' });
+  }
   try {
+    /** users.email 列作为通用「账号」存储，兼容历史邮箱数据 */
     const stmt = db.prepare('INSERT INTO users (email, password, name) VALUES (?, ?, ?)');
-    const info = stmt.run(email, password, name);
+    const info = stmt.run(account, password, name);
     res.json({ success: true, message: '注册成功', userId: info.lastInsertRowid });
   } catch (error) {
     const msg = String(error?.message || '');
     if (msg.includes('UNIQUE constraint')) {
-      res.status(400).json({ success: false, message: '该邮箱已被注册' });
+      res.status(400).json({ success: false, message: '该账号已被注册' });
     } else {
       res.status(500).json({ success: false, message: '注册失败，请稍后重试' });
     }
@@ -1322,19 +1396,23 @@ app.post('/api/auth/register', (req, res) => {
 });
 
 app.post('/api/auth/login', (req, res) => {
-  const { email, password } = req.body;
-  const stmt = db.prepare('SELECT * FROM users WHERE email = ? AND password = ?');
-  const user = stmt.get(email, password);
-
-  if (user) {
-    res.json({
-      success: true,
-      message: '登录成功',
-      user: { id: user.id, name: user.name, email: user.email },
-    });
-  } else {
-    res.status(401).json({ success: false, message: '邮箱或密码错误' });
+  const account = String(req.body.account || req.body.email || '').trim();
+  const password = String(req.body.password || '');
+  if (!account || !password) {
+    return res.status(400).json({ success: false, message: '请填写账号与密码' });
   }
+  const row = db.prepare('SELECT * FROM users WHERE email = ?').get(account);
+  if (!row) {
+    return res.status(404).json({ success: false, error: 'ACCOUNT_NOT_FOUND', message: '该账号未注册' });
+  }
+  if (String(row.password || '') !== password) {
+    return res.status(401).json({ success: false, message: '账号或密码错误' });
+  }
+  res.json({
+    success: true,
+    message: '登录成功',
+    user: { id: row.id, name: row.name, email: row.email },
+  });
 });
 
 app.get('/api/user/profile', (req, res) => {
@@ -1388,6 +1466,54 @@ app.get('/api/stats', (req, res) => {
   } catch (error) {
     logger.error('[stats GET]', error);
     res.status(500).json({ success: false, message: '读取统计失败' });
+  }
+});
+
+/** 记录一次评分（如点赞 score=1） */
+app.post('/api/ratings', (req, res) => {
+  try {
+    const score = Number(req.body?.score);
+    if (!Number.isFinite(score) || Math.abs(Math.trunc(score)) > 10) {
+      return res.status(400).json({ success: false, message: '需要有效 score（整数，如 1 表示点赞）' });
+    }
+    const s = Math.trunc(score);
+    const info = db.prepare('INSERT INTO ai_ratings (score) VALUES (?)').run(s);
+    res.json({ success: true, id: Number(info.lastInsertRowid) });
+  } catch (error) {
+    logger.error('[ratings POST]', error);
+    res.status(500).json({ success: false, message: '保存评分失败' });
+  }
+});
+
+function formatRatingTrendDateKey(d) {
+  const parts = String(d || '').split('-');
+  if (parts.length >= 3) {
+    return `${parts[1]}-${parts[2]}`;
+  }
+  return String(d || '');
+}
+
+/** 按日汇总评分条数，供折线图 */
+app.get('/api/ratings/trend', (req, res) => {
+  try {
+    const days = Math.min(365, Math.max(7, Number.parseInt(String(req.query.days || '90'), 10) || 90));
+    const rows = db
+      .prepare(
+        `SELECT date(created_at) AS d, COUNT(*) AS c
+         FROM ai_ratings
+         WHERE datetime(created_at) >= datetime('now', ?)
+         GROUP BY date(created_at)
+         ORDER BY d ASC`,
+      )
+      .all(`-${days} days`);
+    const items = (rows || []).map((r) => ({
+      date: formatRatingTrendDateKey(r.d),
+      count: Number(r.c || 0),
+    }));
+    res.json({ success: true, items, days });
+  } catch (error) {
+    logger.error('[ratings/trend GET]', error);
+    res.status(500).json({ success: false, message: '读取趋势失败' });
   }
 });
 
@@ -2045,7 +2171,11 @@ app.post(
           mimeType: req.file.mimetype || '',
           folderPath: '文献资料',
           contentText: text,
-          metadata: { charCount: fullLen, truncated, mimeKind: ext === '.pdf' ? 'pdf' : 'docx' },
+          metadata: {
+            charCount: fullLen,
+            truncated,
+            mimeKind: ext === '.pdf' ? 'pdf' : ext === '.doc' ? 'doc' : 'docx',
+          },
         });
       }
       return res.json({
@@ -2054,7 +2184,7 @@ app.post(
         charCount: fullLen,
         truncated,
         filename: req.file.originalname || '',
-        mimeKind: ext === '.pdf' ? 'pdf' : 'docx',
+        mimeKind: ext === '.pdf' ? 'pdf' : ext === '.doc' ? 'doc' : 'docx',
         libraryItemId,
       });
     } catch (err) {
@@ -2243,7 +2373,7 @@ app.post('/api/library/upload', libraryUpload.single('file'), async (req, res) =
     }
     const ext = path.extname(req.file.originalname || '').toLowerCase();
     let contentText = '';
-    if (ext === '.pdf' || ext === '.docx') {
+    if (ext === '.pdf' || ext === '.docx' || ext === '.doc') {
       try {
         contentText = (await extractPaperTextFromPath(getMulterAbsPath(req.file), ext)).slice(0, 120000);
       } catch (e) {
@@ -2267,13 +2397,46 @@ app.post('/api/library/upload', libraryUpload.single('file'), async (req, res) =
       folderPath: sanitizeLibraryFolderPath(req.body?.folderPath || '手动上传'),
       tags: req.body?.tags ? String(req.body.tags).split(/[，,;；\s]+/) : [],
       contentText,
-      metadata: { size: req.file.size || 0, ext },
+      metadata: { size: req.file.size || 0, ext, docLegacy: ext === '.doc' && !contentText },
     });
     const row = db.prepare('SELECT * FROM knowledge_items WHERE id = ?').get(id);
     res.json({ success: true, item: parseLibraryRow(row) });
   } catch (error) {
     logger.error('[library/upload POST]', error);
     res.status(500).json({ success: false, message: '资料上传失败' });
+  }
+});
+
+function sanitizeKnowledgeItemTitleInput(name) {
+  return String(name || '')
+    .trim()
+    .replace(/[/\\<>:*?"|]/g, '')
+    .replace(/\u0000/g, '')
+    .slice(0, 240);
+}
+
+/** 资料库文件重命名（仅改展示标题 title） */
+app.put('/api/files/:id/rename', (req, res) => {
+  try {
+    const email = String(req.body?.email || req.query.email || '').trim();
+    const id = Number.parseInt(String(req.params.id || ''), 10);
+    const newTitle = sanitizeKnowledgeItemTitleInput(req.body?.newName ?? req.body?.title ?? '');
+    if (!email || !Number.isFinite(id)) {
+      return res.status(400).json({ success: false, message: '参数无效' });
+    }
+    if (!newTitle) {
+      return res.status(400).json({ success: false, message: '名称不能为空或含有非法字符' });
+    }
+    const row = db.prepare('SELECT * FROM knowledge_items WHERE id = ? AND user_email = ?').get(id, email);
+    if (!row) {
+      return res.status(404).json({ success: false, message: '文件不存在或无权操作' });
+    }
+    db.prepare(`UPDATE knowledge_items SET title = ?, updated_at = datetime('now') WHERE id = ? AND user_email = ?`).run(newTitle, id, email);
+    const next = db.prepare('SELECT * FROM knowledge_items WHERE id = ?').get(id);
+    res.json({ success: true, item: parseLibraryRow(next) });
+  } catch (error) {
+    logger.error('[files/rename PUT]', error);
+    res.status(500).json({ success: false, message: '重命名失败' });
   }
 });
 
@@ -2424,28 +2587,15 @@ function flushSseResponse(res) {
 const MAX_CHAT_SYSTEM_CONTEXT = 16000;
 const MAX_PAPER_CONTEXT_BODY_CHARS = 5000;
 
-const meetingMulterGate = (req, res, next) => {
-  meetingAudioUpload.single('audio')(req, res, (err) => {
-    if (err) {
-      return res.status(400).json({ success: false, message: String(err.message || err || '音频上传失败') });
-    }
-    next();
-  });
-};
-
 /**
- * 会议纪要：上传音频（≤20MB）或粘贴逐字稿 → Whisper 真实转写 → Agent 结构化纪要 → 可选写入待办
- * @param {{ requireAudioFile?: boolean }} opts requireAudioFile 为 true 时仅允许走 /api/meeting/upload
+ * 会议纪要：接收已完成的实时转写文本 → Agent 结构化纪要 → 可选写入待办（不再经 HTTP 上传语音文件）
  */
-function createMeetingProcessHandler(opts = {}) {
-  const requireAudioFile = opts.requireAudioFile === true;
+function createMeetingProcessHandler() {
   return async (req, res) => {
     try {
       req.socket?.setTimeout?.(900000);
       const userEmail = String(req.body?.userEmail || '').trim();
-      const whisperApiKey = String(req.body?.whisperApiKey || '').trim();
-      const whisperBaseUrl = String(req.body?.whisperBaseUrl || '').trim();
-      let transcript = String(req.body?.transcript || '').trim();
+      const transcript = String(req.body?.transcript || '').trim();
       const modelRow = getBestEnabledModelConfig();
       let modelConfig = rowToModelConfig(modelRow);
       if (!modelConfig) {
@@ -2458,44 +2608,26 @@ function createMeetingProcessHandler(opts = {}) {
         });
       }
 
-      let savedRelative = '';
-      if (req.file) {
-        savedRelative = path.relative(uploadsDir, getMulterMeetingAbsPath(req.file)).replace(/\\/g, '/');
-        if (!transcript) {
-          const absAudio = getMulterMeetingAbsPath(req.file);
-          transcript = await transcribeMeetingAudioFile(
-            modelConfig,
-            absAudio,
-            req.file.originalname || path.basename(absAudio),
-            { whisperApiKey, whisperBaseUrl },
-          );
-        }
-      }
-
-      if (requireAudioFile && !req.file) {
-        return res.status(400).json({
-          success: false,
-          message: '请上传会议录音（.mp3 / .wav / .m4a / .webm / .ogg）。',
-        });
-      }
-
       if (!transcript) {
         return res.status(400).json({
           success: false,
-          message: '请上传音频或粘贴会议逐字稿（其一必填）。',
+          message: '缺少会议转写文本：请先完成实时录音转写，或粘贴逐字稿后再生成纪要。',
         });
       }
 
-      const minutesMarkdown = await generateMeetingMinutesMarkdown(modelConfig, transcript);
+      const { markdown: minutesMarkdown, tasks } = await generateMeetingMinutesMarkdown(modelConfig, transcript);
 
       let todosInserted = 0;
       if (userEmail) {
-        const items = await extractTodosJson(
-          modelConfig,
-          `【会议纪要】\n${minutesMarkdown}\n\n【逐字稿摘录】\n${transcript.slice(0, 6000)}`,
-          new Date().toISOString(),
-        );
-        todosInserted = insertTodoRows(db, userEmail, items, 'meeting');
+        todosInserted = insertTodoRowsFromAgentTaskList(db, userEmail, tasks, 'meeting', new Date());
+        if (todosInserted === 0) {
+          const items = await extractTodosJson(
+            modelConfig,
+            `【会议纪要】\n${minutesMarkdown}\n\n【逐字稿摘录】\n${transcript.slice(0, 6000)}`,
+            new Date().toISOString(),
+          );
+          todosInserted = insertTodoRows(db, userEmail, items, 'meeting');
+        }
       }
 
       let libraryItemId = null;
@@ -2505,13 +2637,13 @@ function createMeetingProcessHandler(opts = {}) {
           title: `会议纪要 ${new Date().toLocaleString('zh-CN', { hour12: false })}`,
           itemType: 'meeting',
           sourceKind: 'meeting_minutes',
-          originalName: req.file?.originalname || '会议纪要',
-          storedFilename: savedRelative || '',
-          mimeType: req.file?.mimetype || '',
+          originalName: '会议纪要',
+          storedFilename: '',
+          mimeType: 'text/plain',
           folderPath: '会议纪要',
           contentText: transcript,
           summaryText: minutesMarkdown,
-          metadata: { todosInserted, hasAudio: !!savedRelative },
+          metadata: { todosInserted, hasAudio: false },
         });
       }
 
@@ -2519,19 +2651,14 @@ function createMeetingProcessHandler(opts = {}) {
         success: true,
         transcript,
         minutesMarkdown,
-        savedAudioPath: savedRelative || null,
+        savedAudioPath: null,
         todosInserted,
         libraryItemId,
       });
     } catch (error) {
       logger.error('[meeting]', error);
       const msg = String(error?.message || error || '会议纪要处理失败');
-      const isConfigHint =
-        msg.includes('请先在设置页') ||
-        msg.includes('语音识别') ||
-        msg.includes('Whisper Base URL') ||
-        msg.includes('不支持语音转写');
-      res.status(isConfigHint ? 400 : 500).json({
+      res.status(500).json({
         success: false,
         message: msg,
       });
@@ -2539,10 +2666,117 @@ function createMeetingProcessHandler(opts = {}) {
   };
 }
 
-app.post('/api/meeting/process', meetingMulterGate, createMeetingProcessHandler({ requireAudioFile: false }));
+app.post('/api/meeting/process', createMeetingProcessHandler());
 
-/** 智能会议纪要：仅接收音频文件（与 process 共用处理链，便于前端长耗时单接口） */
-app.post('/api/meeting/upload', meetingMulterGate, createMeetingProcessHandler({ requireAudioFile: true }));
+/**
+ * 离线音频上传：磁盘流式接收 → DashScope 实时 ASR 文件链路 → 纪要 + 结构化待办入库（不落盘长期保留音频）
+ */
+app.post('/api/meeting/file-transcribe', meetingFileMulterGate, async (req, res) => {
+  const absPath = getMulterAbsPath(req.file);
+  const unlinkSafe = () => {
+    try {
+      if (absPath && fs.existsSync(absPath)) {
+        fs.unlinkSync(absPath);
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+  const ac = new AbortController();
+  const onClose = () => ac.abort();
+  req.on('close', onClose);
+  try {
+    req.socket?.setTimeout?.(900000);
+    if (!req.file || !absPath) {
+      logger.error('[meeting/file-transcribe] 未收到上传文件', {
+        hasFile: Boolean(req.file),
+        contentType: req.headers['content-type'],
+        fieldNames: req.body && typeof req.body === 'object' ? Object.keys(req.body) : [],
+      });
+      unlinkSafe();
+      return res.status(400).json({ success: false, message: '请上传 .mp3 / .wav / .m4a 文件（字段名须为 file）' });
+    }
+    const userEmail = String(req.body?.userEmail || '').trim();
+    const asrWsUrl = String(req.body?.asrWsUrl || '').trim();
+    const asrApiKey = String(req.body?.asrApiKey || '').trim();
+    if (!asrApiKey) {
+      unlinkSafe();
+      return res.status(400).json({ success: false, message: '缺少实时 ASR API Key（百炼）' });
+    }
+    try {
+      assertSafeDashscopeRealtimeUrl(asrWsUrl || DEFAULT_REALTIME_WS);
+    } catch (e) {
+      unlinkSafe();
+      return res.status(400).json({ success: false, message: String(e?.message || e || 'URL 无效') });
+    }
+    const modelRow = getBestEnabledModelConfig();
+    let modelConfig = rowToModelConfig(modelRow);
+    if (!modelConfig) {
+      modelConfig = fallbackEnvModelConfig();
+    }
+    if (!modelConfig) {
+      unlinkSafe();
+      return res.status(503).json({ success: false, message: '没有可用的已启用模型配置，无法生成纪要。' });
+    }
+
+    const transcript = await transcribeUploadedAudioFile(absPath, {
+      apiKey: asrApiKey,
+      wsUrl: asrWsUrl || DEFAULT_REALTIME_WS,
+      signal: ac.signal,
+    });
+    const text = String(transcript || '').trim();
+    if (!text) {
+      unlinkSafe();
+      return res.status(400).json({ success: false, message: '转写结果为空，请检查音频与 ASR 配置' });
+    }
+
+    const { markdown: minutesMarkdown, tasks } = await generateMeetingMinutesMarkdown(modelConfig, text);
+
+    let todosInserted = 0;
+    if (userEmail) {
+      todosInserted = insertTodoRowsFromAgentTaskList(db, userEmail, tasks, 'meeting', new Date());
+      if (todosInserted === 0) {
+        const items = await extractTodosJson(
+          modelConfig,
+          `【会议纪要】\n${minutesMarkdown}\n\n【逐字稿摘录】\n${text.slice(0, 6000)}`,
+          new Date().toISOString(),
+        );
+        todosInserted = insertTodoRows(db, userEmail, items, 'meeting');
+      }
+    }
+
+    let libraryItemId = null;
+    if (userEmail) {
+      libraryItemId = insertKnowledgeItem({
+        userEmail,
+        title: `会议纪要 ${new Date().toLocaleString('zh-CN', { hour12: false })}`,
+        itemType: 'meeting',
+        sourceKind: 'meeting_minutes',
+        originalName: req.file?.originalname || '上传录音',
+        storedFilename: '',
+        mimeType: String(req.file?.mimetype || 'audio/mpeg'),
+        folderPath: '会议纪要',
+        contentText: text,
+        summaryText: minutesMarkdown,
+        metadata: { todosInserted, hasAudio: true, source: 'file-transcribe' },
+      });
+    }
+
+    res.json({
+      success: true,
+      transcript: text,
+      minutesMarkdown,
+      todosInserted,
+      libraryItemId,
+    });
+  } catch (error) {
+    logger.error('[meeting/file-transcribe]', error);
+    res.status(500).json({ success: false, message: String(error?.message || error || '处理失败') });
+  } finally {
+    req.off('close', onClose);
+    unlinkSafe();
+  }
+});
 
 /** PPT：由模型生成 Markdown 提纲（非流式，避免阻塞过久可单独重试） */
 app.post('/api/ppt/generate-outline', async (req, res) => {
@@ -2596,7 +2830,12 @@ app.get('/api/todos', (req, res) => {
     }
     const rows = db
       .prepare(
-        `SELECT id, title, remind_at AS remindAt, notes, source, done, created_at AS createdAt
+        `SELECT id, title, remind_at AS remindAt, notes, source, done, created_at AS createdAt,
+                COALESCE(status, 'pending') AS status,
+                COALESCE(repeat_mode, 'once') AS repeatMode,
+                COALESCE(repeat_custom_days, '[]') AS repeatCustomDays,
+                COALESCE(TRIM(pushed_wecom_at), '') AS pushedWecomAt,
+                COALESCE(TRIM(pushed_feishu_at), '') AS pushedFeishuAt
          FROM todos WHERE user_email = ? ORDER BY remind_at ASC LIMIT 500`,
       )
       .all(email);
@@ -2609,12 +2848,40 @@ app.get('/api/todos', (req, res) => {
 
 app.post('/api/todos', (req, res) => {
   try {
-    const { userEmail, title, remindAt, notes, source } = req.body || {};
+    const {
+      userEmail,
+      title,
+      remindAt,
+      notes,
+      source,
+      repeatMode: repeatModeRaw,
+      repeatCustomDays: repeatCustomDaysRaw,
+    } = req.body || {};
     const email = String(userEmail || '').trim();
     const t = String(title || '').trim().slice(0, 500);
     const remind = String(remindAt || '').trim().slice(0, 40);
     const memo = String(notes || '').trim().slice(0, 2000);
     const src = String(source || 'manual').trim().slice(0, 40) || 'manual';
+    const rm = String(repeatModeRaw || 'once').toLowerCase().trim();
+    const repeatMode = ['once', 'daily', 'workday', 'custom_days'].includes(rm) ? rm : 'once';
+    let repeatCustomDaysJson = '[]';
+    if (repeatMode === 'custom_days') {
+      const arr = Array.isArray(repeatCustomDaysRaw) ? repeatCustomDaysRaw : [];
+      const norm = [];
+      const seen = new Set();
+      for (const x of arr) {
+        const n = Number.parseInt(String(x), 10);
+        if (Number.isFinite(n) && n >= 1 && n <= 7 && !seen.has(n)) {
+          seen.add(n);
+          norm.push(n);
+        }
+      }
+      norm.sort((a, b) => a - b);
+      repeatCustomDaysJson = JSON.stringify(norm);
+      if (norm.length === 0) {
+        return res.status(400).json({ success: false, message: '自定义重复请至少选择一个星期' });
+      }
+    }
     if (!email) {
       return res.status(400).json({ success: false, message: '需要 userEmail' });
     }
@@ -2626,10 +2893,10 @@ app.post('/api/todos', (req, res) => {
     }
     const info = db
       .prepare(
-        `INSERT INTO todos (user_email, title, remind_at, notes, source, done)
-         VALUES (?, ?, ?, ?, ?, 0)`,
+        `INSERT INTO todos (user_email, title, remind_at, notes, source, done, repeat_mode, repeat_custom_days, status)
+         VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'pending')`,
       )
-      .run(email, t, remind, memo, src);
+      .run(email, t, remind, memo, src, repeatMode, repeatCustomDaysJson);
     res.json({
       success: true,
       item: {
@@ -2639,6 +2906,9 @@ app.post('/api/todos', (req, res) => {
         notes: memo,
         source: src,
         done: 0,
+        repeatMode,
+        repeatCustomDays: repeatCustomDaysJson,
+        status: 'pending',
       },
     });
   } catch (error) {
@@ -2658,18 +2928,28 @@ app.get('/api/todos/upcoming', (req, res) => {
     const untilIso = new Date(Date.now() + hours * 3600000).toISOString();
     const soon = db
       .prepare(
-        `SELECT id, title, remind_at AS remindAt, notes, source
+        `SELECT id, title, remind_at AS remindAt, notes, source,
+                COALESCE(repeat_mode, 'once') AS repeatMode,
+                COALESCE(repeat_custom_days, '[]') AS repeatCustomDays,
+                COALESCE(status, 'pending') AS status
          FROM todos
-         WHERE user_email = ? AND done = 0 AND remind_at >= ? AND remind_at <= ?
+         WHERE user_email = ? AND done = 0
+           AND (status IS NULL OR status = '' OR status = 'pending')
+           AND remind_at >= ? AND remind_at <= ?
          ORDER BY remind_at ASC LIMIT 30`,
       )
       .all(email, nowIso, untilIso);
     const overdue = db
       .prepare(
-        `SELECT id, title, remind_at AS remindAt, notes, source
+        `SELECT id, title, remind_at AS remindAt, notes, source,
+                COALESCE(repeat_mode, 'once') AS repeatMode,
+                COALESCE(repeat_custom_days, '[]') AS repeatCustomDays,
+                COALESCE(status, 'pending') AS status
          FROM todos
-         WHERE user_email = ? AND done = 0 AND remind_at < ?
-         ORDER BY remind_at ASC LIMIT 15`,
+         WHERE user_email = ? AND done = 0
+           AND (status IS NULL OR status = '' OR status = 'pending')
+           AND remind_at < ?
+         ORDER BY remind_at ASC LIMIT 30`,
       )
       .all(email, nowIso);
     res.json({ success: true, items: soon, overdue, windowHours: hours });
@@ -2730,6 +3010,72 @@ app.patch('/api/todos/:id/done', (req, res) => {
   }
 });
 
+/** 修改提醒时间（未到点或可编辑的 pending 待办） */
+app.patch('/api/todos/:id/remind-at', (req, res) => {
+  try {
+    const email = String(req.body?.email || req.query.email || '').trim();
+    if (!email) {
+      return res.status(400).json({ success: false, message: '需要 email' });
+    }
+    const id = Number.parseInt(String(req.params.id || ''), 10);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ success: false, message: '无效 ID' });
+    }
+    const remindAt = String(req.body?.remindAt || '').trim();
+    if (!remindAt || Number.isNaN(Date.parse(remindAt))) {
+      return res.status(400).json({ success: false, message: 'remindAt 无效' });
+    }
+    const info = db
+      .prepare(
+        `UPDATE todos SET remind_at = ?, status = 'pending',
+              pushed_wecom_at = NULL, pushed_feishu_at = NULL,
+              pushed_wecom_status = NULL, pushed_feishu_status = NULL,
+              push_retry_count = 0
+         WHERE id = ? AND user_email = ? AND done = 0`,
+      )
+      .run(remindAt, id, email);
+    if (info.changes === 0) {
+      return res.status(404).json({ success: false, message: '未找到待办或无权操作' });
+    }
+    res.json({ success: true, remindAt });
+  } catch (error) {
+    logger.error('[todos/remind-at]', error);
+    res.status(500).json({ success: false, message: '更新时间失败' });
+  }
+});
+
+/** 稍后提醒：基于当前时间推迟 remind_at，恢复为 pending */
+app.post('/api/todos/:id/snooze', (req, res) => {
+  try {
+    const email = String(req.body?.email || req.query.email || '').trim();
+    if (!email) {
+      return res.status(400).json({ success: false, message: '需要 email' });
+    }
+    const id = Number.parseInt(String(req.params.id || ''), 10);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ success: false, message: '无效 ID' });
+    }
+    const minutes = Math.min(10080, Math.max(1, Number.parseInt(String(req.body?.minutes ?? 10), 10) || 10));
+    const newRemindIso = new Date(Date.now() + minutes * 60000).toISOString();
+    const info = db
+      .prepare(
+        `UPDATE todos SET status = 'pending', remind_at = ?,
+              pushed_wecom_at = NULL, pushed_feishu_at = NULL,
+              pushed_wecom_status = NULL, pushed_feishu_status = NULL,
+              push_retry_count = 0
+         WHERE id = ? AND user_email = ? AND done = 0`,
+      )
+      .run(newRemindIso, id, email);
+    if (info.changes === 0) {
+      return res.status(404).json({ success: false, message: '未找到待办或无权操作' });
+    }
+    res.json({ success: true, remindAt: newRemindIso, minutes });
+  } catch (error) {
+    logger.error('[todos/snooze]', error);
+    res.status(500).json({ success: false, message: '稍后提醒失败' });
+  }
+});
+
 app.delete('/api/todos/:id', (req, res) => {
   try {
     const email = String(req.query.email || '').trim();
@@ -2785,7 +3131,7 @@ function sanitizeWecomMarkdownField(s, maxLen = 800) {
 function buildWecomTodoMarkdownPayload(row) {
   const task = sanitizeWecomMarkdownField(row.title || '') || '待办提醒';
   const remindTime = sanitizeWecomMarkdownField(row.remindAt || '') || '—';
-  const content = `**<font color="warning">⏰ 待办提醒触发</font>**\n> **任务**：${task}\n> **预定时间**：${remindTime}\n\n*来自 OpenClaw 智能助理*`;
+  const content = `**<font color="warning">待办提醒触发</font>**\n> **任务**：${task}\n> **预定时间**：${remindTime}\n\n*来自会意助手*`;
   return {
     msgtype: 'markdown',
     markdown: { content },
@@ -2972,7 +3318,7 @@ app.post('/api/configs/test-push', async (req, res) => {
   if (!url) {
     return res.status(400).json({ success: false, message: '缺少 url：请先填写 Webhook 地址' });
   }
-  const text = 'OpenClaw 链路测试成功！';
+    const text = '会意助手链路测试成功！';
   try {
     if (channel === 'feishu') {
       const r = await axios.post(
@@ -3062,7 +3408,7 @@ app.post('/api/configs/webhooks/test', async (req, res) => {
     if (!url) {
       return res.status(400).json({ success: false, message: '请先填写 Webhook URL 或保存配置' });
     }
-    const text = `OpenClaw 外联推送测试 · ${new Date().toLocaleString('zh-CN', { hour12: false })}`;
+    const text = `会意助手外联推送测试 · ${new Date().toLocaleString('zh-CN', { hour12: false })}`;
     if (channel === 'wecom') {
       await sendWecomText(url, text);
     } else if (channel === 'feishu') {
@@ -3116,7 +3462,137 @@ function isRemindDueNow(remindAtStr, nowMs = Date.now()) {
   return t <= nowMs;
 }
 
+/** JS Date.getDay(): 0=周日 … 6=周六 → 转为 1=周一 … 7=周日 */
+function weekdayMonSunFromDate(d) {
+  const js = d.getDay();
+  return js === 0 ? 7 : js;
+}
+
+function parseRepeatCustomDaysJson(raw) {
+  try {
+    const arr = JSON.parse(String(raw || '[]'));
+    if (!Array.isArray(arr)) {
+      return [];
+    }
+    const out = new Set();
+    for (const x of arr) {
+      const n = Number.parseInt(String(x), 10);
+      if (Number.isFinite(n) && n >= 1 && n <= 7) {
+        out.add(n);
+      }
+    }
+    return [...out].sort((a, b) => a - b);
+  } catch {
+    return [];
+  }
+}
+
+/** 循环提醒：在推送成功后计算下一次 remind_at（daily / workday / custom_days） */
+function computeNextRemindIso(remindAtStr, mode, repeatCustomDaysRaw) {
+  const modeNorm = String(mode || 'once').toLowerCase();
+  const baseMs = parseRemindAtToUtcMs(remindAtStr);
+  if (!Number.isFinite(baseMs)) {
+    return new Date(Date.now() + 60000).toISOString();
+  }
+  if (modeNorm === 'daily') {
+    return new Date(baseMs + 86400000).toISOString();
+  }
+  if (modeNorm === 'workday') {
+    const d = new Date(baseMs);
+    d.setDate(d.getDate() + 1);
+    while (d.getDay() === 0 || d.getDay() === 6) {
+      d.setDate(d.getDate() + 1);
+    }
+    return d.toISOString();
+  }
+  if (modeNorm === 'custom_days') {
+    const days = parseRepeatCustomDaysJson(repeatCustomDaysRaw);
+    if (days.length === 0) {
+      return new Date(baseMs + 86400000).toISOString();
+    }
+    const baseDate = new Date(baseMs);
+    const hh = baseDate.getHours();
+    const mi = baseDate.getMinutes();
+    const ss = baseDate.getSeconds();
+    const ms = baseDate.getMilliseconds();
+    for (let add = 1; add <= 366; add += 1) {
+      const cand = new Date(baseMs + add * 86400000);
+      cand.setHours(hh, mi, ss, ms);
+      if (days.includes(weekdayMonSunFromDate(cand))) {
+        return cand.toISOString();
+      }
+    }
+    return new Date(baseMs + 86400000).toISOString();
+  }
+  return new Date(baseMs + 86400000).toISOString();
+}
+
 let todoPushInFlight = false;
+
+async function pushSingleTodoWebhooks(row, wecomUrl, feishuUrl) {
+  const textBody = buildWecomTodoText(row);
+  const needWe = Boolean(wecomUrl);
+  const needFe = Boolean(feishuUrl);
+  let wecomOk = !needWe || Boolean(String(row.pushedWecomAt || '').trim());
+  let feishuOk = !needFe || Boolean(String(row.pushedFeishuAt || '').trim());
+  if (needWe && !wecomOk) {
+    try {
+      await sendWecomTodoMarkdownWebhook(wecomUrl, row);
+      db.prepare(`UPDATE todos SET pushed_wecom_at = datetime('now'), pushed_wecom_status = ? WHERE id = ?`).run('ok', row.id);
+      wecomOk = true;
+    } catch (error) {
+      const msg = String(error?.message || error || 'push failed').slice(0, 200);
+      db.prepare('UPDATE todos SET pushed_wecom_status = ? WHERE id = ?').run(msg, row.id);
+      logger.error('[todos/wecom] 单条待办推送失败', {
+        todoId: row.id,
+        errorMessage: error?.message,
+        stack: error?.stack,
+        responseData: error?.response?.data,
+      });
+    }
+  }
+  if (needFe && !feishuOk) {
+    try {
+      await sendFeishuText(feishuUrl, textBody);
+      db.prepare(`UPDATE todos SET pushed_feishu_at = datetime('now'), pushed_feishu_status = ? WHERE id = ?`).run('ok', row.id);
+      feishuOk = true;
+    } catch (error) {
+      const msg = String(error?.message || error || 'push failed').slice(0, 200);
+      db.prepare('UPDATE todos SET pushed_feishu_status = ? WHERE id = ?').run(msg, row.id);
+      logger.error('[todos/feishu] 单条待办推送失败', {
+        todoId: row.id,
+        errorMessage: error?.message,
+        stack: error?.stack,
+        responseData: error?.response?.data,
+      });
+    }
+  }
+  const allOk = (!needWe || wecomOk) && (!needFe || feishuOk);
+  if (allOk) {
+    const repeatMode = String(row.repeatMode || row.repeat_mode || 'once').toLowerCase();
+    if (repeatMode === 'daily' || repeatMode === 'workday' || repeatMode === 'custom_days') {
+      const nextAt = computeNextRemindIso(row.remindAt, repeatMode, row.repeatCustomDays || row.repeat_custom_days);
+      db.prepare(
+        `UPDATE todos SET remind_at = ?, status = 'pending', push_retry_count = 0,
+              pushed_wecom_at = NULL, pushed_feishu_at = NULL,
+              pushed_wecom_status = NULL, pushed_feishu_status = NULL
+         WHERE id = ? AND done = 0`,
+      ).run(nextAt, row.id);
+      logger.info('[调度器] 循环待办已顺延下一次提醒', { todoId: row.id, nextAt, repeatMode });
+    } else {
+      db.prepare(`UPDATE todos SET status = 'notified', push_retry_count = 0 WHERE id = ? AND done = 0`).run(row.id);
+      logger.info('[调度器] 待办已标记为已通知', { todoId: row.id });
+    }
+  } else {
+    db.prepare(`UPDATE todos SET push_retry_count = COALESCE(push_retry_count, 0) + 1 WHERE id = ?`).run(row.id);
+    const cnt = db.prepare('SELECT push_retry_count AS c FROM todos WHERE id = ?').get(row.id);
+    logger.info('[调度器] 待办推送未完全成功，已增加 push_retry_count', {
+      todoId: row.id,
+      pushRetryCount: cnt?.c,
+    });
+  }
+}
+
 async function runTodoWebhookPush() {
   logger.info(`[调度器] 正在扫描待办... 当前系统时间：${new Date().toLocaleString('zh-CN', { hour12: false })}`);
   if (todoPushInFlight) {
@@ -3146,7 +3622,9 @@ async function runTodoWebhookPush() {
       .prepare(
         `SELECT id, user_email AS userEmail, title, remind_at AS remindAt, notes,
                 pushed_wecom_at AS pushedWecomAt, pushed_feishu_at AS pushedFeishuAt,
-                COALESCE(push_retry_count, 0) AS pushRetryCount
+                COALESCE(push_retry_count, 0) AS pushRetryCount,
+                COALESCE(repeat_mode, 'once') AS repeatMode,
+                COALESCE(repeat_custom_days, '[]') AS repeatCustomDays
          FROM todos
          WHERE done = 0
            AND (status IS NULL OR status = '' OR status = 'pending')
@@ -3158,17 +3636,8 @@ async function runTodoWebhookPush() {
          ORDER BY remind_at ASC LIMIT ?`,
       )
       .all(TODO_PUSH_MAX_RETRY, wecomUrl, feishuUrl, TODO_REMIND_CANDIDATE_SQL_LIMIT);
-    logger.info(`[调度器] 从数据库找到 ${candidates.length} 条待办任务`);
-    const due = [];
-    for (const row of candidates) {
-      if (!isRemindDueNow(row.remindAt, nowMs)) {
-        continue;
-      }
-      due.push(row);
-      if (due.length >= 25) {
-        break;
-      }
-    }
+    logger.info(`[调度器] 从数据库找到 ${candidates.length} 条候选待办`);
+    const due = candidates.filter((row) => isRemindDueNow(row.remindAt, nowMs));
     if (due.length > 0) {
       logger.info('[调度器] 时间条件命中，待推送条数', {
         count: due.length,
@@ -3176,56 +3645,7 @@ async function runTodoWebhookPush() {
         feishuUrlState: feishuUrl ? '已获取' : '为空',
       });
     }
-    for (const row of due) {
-      const textBody = buildWecomTodoText(row);
-      const needWe = Boolean(wecomUrl);
-      const needFe = Boolean(feishuUrl);
-      let wecomOk = !needWe || Boolean(String(row.pushedWecomAt || '').trim());
-      let feishuOk = !needFe || Boolean(String(row.pushedFeishuAt || '').trim());
-      if (needWe && !wecomOk) {
-        try {
-          await sendWecomTodoMarkdownWebhook(wecomUrl, row);
-          db.prepare(`UPDATE todos SET pushed_wecom_at = datetime('now'), pushed_wecom_status = ? WHERE id = ?`).run('ok', row.id);
-          wecomOk = true;
-        } catch (error) {
-          const msg = String(error?.message || error || 'push failed').slice(0, 200);
-          db.prepare('UPDATE todos SET pushed_wecom_status = ? WHERE id = ?').run(msg, row.id);
-          logger.error('[todos/wecom] 单条待办推送失败', {
-            todoId: row.id,
-            errorMessage: error?.message,
-            stack: error?.stack,
-            responseData: error?.response?.data,
-          });
-        }
-      }
-      if (needFe && !feishuOk) {
-        try {
-          await sendFeishuText(feishuUrl, textBody);
-          db.prepare(`UPDATE todos SET pushed_feishu_at = datetime('now'), pushed_feishu_status = ? WHERE id = ?`).run('ok', row.id);
-          feishuOk = true;
-        } catch (error) {
-          const msg = String(error?.message || error || 'push failed').slice(0, 200);
-          db.prepare('UPDATE todos SET pushed_feishu_status = ? WHERE id = ?').run(msg, row.id);
-          logger.error('[todos/feishu] 单条待办推送失败', {
-            todoId: row.id,
-            errorMessage: error?.message,
-            stack: error?.stack,
-            responseData: error?.response?.data,
-          });
-        }
-      }
-      if ((!needWe || wecomOk) && (!needFe || feishuOk)) {
-        db.prepare(`UPDATE todos SET status = 'notified', push_retry_count = 0 WHERE id = ? AND done = 0`).run(row.id);
-        logger.info('[调度器] 待办已标记为已通知', { todoId: row.id });
-      } else {
-        db.prepare(`UPDATE todos SET push_retry_count = COALESCE(push_retry_count, 0) + 1 WHERE id = ?`).run(row.id);
-        const cnt = db.prepare('SELECT push_retry_count AS c FROM todos WHERE id = ?').get(row.id);
-        logger.info('[调度器] 待办推送未完全成功，已增加 push_retry_count', {
-          todoId: row.id,
-          pushRetryCount: cnt?.c,
-        });
-      }
-    }
+    await Promise.allSettled(due.map((row) => pushSingleTodoWebhooks(row, wecomUrl, feishuUrl)));
   } catch (error) {
     logger.error('[todos/webhooks] scheduler failed', {
       message: error?.message,
@@ -4369,7 +4789,7 @@ app.use((err, _req, res, _next) => {
 });
 
 const server = app.listen(port, () => {
-  logger.info(`✅ OpenClaw 后端服务已启动: http://localhost:${port}`);
+  logger.info(`✅ 会意助手后端服务已启动: http://localhost:${port}`);
   logger.info(`[todos/webhooks] 定时推送已启用（间隔 ${TODO_PUSH_POLL_MS}ms，URL 来自 system_configs；未配置则静默跳过）`);
   setTimeout(() => {
     void runTodoWebhookPush();
@@ -4379,7 +4799,8 @@ const server = app.listen(port, () => {
     void runTodoWebhookPush();
   }, TODO_PUSH_POLL_MS);
 });
-/** 上传 + Mock ASR + 大模型纪要可能较慢，避免 Node 默认 ~2min 套接字超时过早断开 */
+attachRealtimeAsrWss(server);
+/** 长耗时对话 / 纪要可能较慢，避免 Node 默认 ~2min 套接字超时过早断开 */
 server.timeout = 900000;
 server.headersTimeout = 910000;
 try {

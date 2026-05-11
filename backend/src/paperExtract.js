@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import path from 'node:path';
 import mammoth from 'mammoth';
 
 /**
@@ -30,6 +33,32 @@ export async function extractPaperTextFromBuffer(buffer, ext) {
   if (e === '.docx') {
     const { value } = await mammoth.extractRawText({ buffer });
     return String(value || '').replace(/\r\n/g, '\n');
+  }
+  if (e === '.doc') {
+    throw new Error('暂不支持旧版 Word（.doc），请在 Word 中另存为 .docx 后再上传');
+  }
+  throw new Error('不支持的文件类型');
+}
+
+/**
+ * 按磁盘路径提取正文：PDF 读入 Buffer；Word 使用 mammoth.extractRawText({ path })（OOXML .docx）。
+ */
+export async function extractPaperTextFromPath(absPath, ext) {
+  const normalized = path.resolve(path.normalize(String(absPath || '')));
+  if (!normalized || !fs.existsSync(normalized)) {
+    throw new Error('文件不存在或路径无效');
+  }
+  const e = String(ext || '').toLowerCase();
+  if (e === '.pdf') {
+    const buf = await fsPromises.readFile(normalized);
+    return extractPaperTextFromBuffer(buf, '.pdf');
+  }
+  if (e === '.docx') {
+    const { value } = await mammoth.extractRawText({ path: normalized });
+    return String(value || '').replace(/\r\n/g, '\n');
+  }
+  if (e === '.doc') {
+    throw new Error('暂不支持旧版 Word（.doc），请在 Word 中另存为 .docx 后再上传');
   }
   throw new Error('不支持的文件类型');
 }

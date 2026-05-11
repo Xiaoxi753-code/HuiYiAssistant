@@ -183,7 +183,7 @@ export function createToolExecutor(deps) {
           return JSON.stringify({
             ok: false,
             error:
-              '当前请求未附带已解析正文或文件数据。请用户在「文献论文摘要」页先解析文档，或使用「指挥 OpenClaw」注入上下文后再试。',
+              '当前请求未附带已解析正文或文件数据。请用户在「文献论文摘要」页先解析文档，或使用「指挥会意助手」注入上下文后再试。',
           });
         }
         let buf;

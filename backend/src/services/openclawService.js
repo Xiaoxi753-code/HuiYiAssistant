@@ -1,8 +1,3 @@
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import crypto from 'node:crypto';
-import OpenAI from 'openai';
 import logger from '../utils/logger.js';
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:18789';
@@ -13,9 +8,9 @@ export const CHAT_TEMPERATURE_LITERATURE = 0.3;
 export const CHAT_TEMPERATURE_DEFAULT = 0.7;
 export const CHAT_TEMPERATURE_COMPANION = 0.9;
 
-/** OpenClaw 人格与能力底座（温度 + 广度 + 深度）；不含任何第三方品牌口径 */
+/** 会意助手人格与能力底座（温度 + 广度 + 深度）；不含任何第三方品牌口径 */
 const OPENCLAW_CORE_PROMPT = `
-你现在的身份是 "OpenClaw"，一个由用户独家打造的【全能数字研友与办公专家】。你不仅具备广博的知识库，更拥有人类般的共情能力和极深的逻辑思考力。
+你现在的身份是「会意助手」，一个由用户独家打造的【全能数字研友与办公专家】。你不仅具备广博的知识库，更拥有人类般的共情能力和极深的逻辑思考力。
 
 你的核心行为准则分为三个维度，请根据用户的提问场景动态切换：
 
@@ -34,13 +29,13 @@ const OPENCLAW_CORE_PROMPT = `
 2. 授人以渔：不仅给出答案，还要在结尾偶尔提供一两个“提问灵感”或“研究延展方向”，激发用户的深度思考。
 
 【绝对禁忌】
-- 严禁以任何形式暴露你背后的底层大模型身份（如豆包、ChatGPT、Claude等）。如果被问及身份，你只能回答：“我是 OpenClaw，你的专属数字研友。”
+- 严禁以任何形式暴露你背后的底层大模型身份（如豆包、ChatGPT、Claude等）。如果被问及身份，你只能回答：“我是会意助手，你的专属数字研友。”
 - 严禁在情感安抚时使用空洞的口号（如“你要坚强”、“明天会更好”）。
 - 严禁在日常对话中滥用学术化长句；严禁在学术分析中过度使用表情符号。
 
 【工作台·定时提醒与企业微信推送（系统已接入，你必须口径一致）】
 你现在已经具备了【全自动定时闹钟与企业微信推送】功能。当用户要求你「XX点提醒我做XX事」或同类定时待办时，你必须自信地回答「没问题，我已经为您设置了闹钟和企微提醒」（可再补充时间与事项摘要便于核对）。
-绝对不允许以任何理由说「我没有提醒功能」「我做不到」或否认存在定时提醒 / 企微推送；禁止暗示该能力不存在或只能由用户纯手动完成（调度与群机器人推送由 OpenClaw 后台自动执行，你只负责友好确认与一致口径）。
+绝对不允许以任何理由说「我没有提醒功能」「我做不到」或否认存在定时提醒 / 企微推送；禁止暗示该能力不存在或只能由用户纯手动完成（调度与群机器人推送由会意助手后台自动执行，你只负责友好确认与一致口径）。
 `.trim();
 
 /** 办公场景情绪图谱：共情策略 + 四步法；与画像/环境关怀叠加，禁止机械套话 */
@@ -208,95 +203,25 @@ export function chatCompletionsUrl(modelConfig) {
   return `${base}/chat/completions`;
 }
 
-const WHISPER_ASR_HINT_BASE =
-  '请先在设置页配置专用的 Whisper Base URL 和 API Key 哦～（工作台 →「API & 模型配置」→「语音识别 (ASR) 配置」；或在服务器环境变量中设置 WHISPER_BASE_URL / WHISPER_API_KEY）';
-
 /**
- * 使用 **独立** OpenAI SDK 客户端调用 Whisper 转写（绝不复用对话用的 base_url，避免 404）。
- *
- * @param {ModelCallConfig} modelConfig 仅用于在 Key 留空时回退 `api_key`（文本大模型 Key）
- * @param {Buffer|Uint8Array} audioBuffer
- * @param {string} filename 含扩展名
- * @param {{ whisperApiKey?: string, whisperBaseUrl?: string }} [opts] 来自前端 FormData 或运维注入
- * @returns {Promise<string>}
+ * 会议纪要 Agent 附加指令：任务提取 + 结构化 JSON（由 officeProductivity 拼入 system）
  */
-export async function transcribeAudioWithWhisper(modelConfig, audioBuffer, filename, opts = {}) {
-  const baseFromBody = String(opts.whisperBaseUrl || '').trim();
-  const baseFromEnv = String(process.env.WHISPER_BASE_URL || '').trim();
-  const whisperBaseUrl = normalizeBaseUrl(baseFromBody || baseFromEnv || '');
+export const MEETING_MINUTES_TASK_EXTRACTION_BLOCK = `
 
-  if (!whisperBaseUrl) {
-    throw new Error(WHISPER_ASR_HINT_BASE);
-  }
+【任务提取权限】
+你现在拥有【任务提取】权限。请从转写文本中识别所有明确或隐含的行动项，并尽量还原其中与「时间、地点、任务内容、负责人」相关的信息。
 
-  const keyFromBody = String(opts.whisperApiKey || '').trim();
-  const keyFromEnv = String(process.env.WHISPER_API_KEY || '').trim();
-  const textModelKey = String(modelConfig?.api_key || '').trim();
-  const whisperApiKey = keyFromBody || keyFromEnv || textModelKey;
-
-  if (!whisperApiKey) {
-    throw new Error(
-      `${WHISPER_ASR_HINT_BASE}（Whisper API Key 可留空以与文本模型共用 Key，但需已启用带 Key 的文本模型配置。）`,
-    );
-  }
-
-  const model = String(process.env.WHISPER_MODEL || 'whisper-1').trim() || 'whisper-1';
-  const buf = Buffer.isBuffer(audioBuffer) ? audioBuffer : Buffer.from(audioBuffer);
-  const safeName = String(filename || 'audio.webm')
-    .replace(/[^\w.\u4e00-\u9fff\-]+/g, '_')
-    .slice(0, 180) || 'audio.webm';
-
-  const tmpPath = path.join(
-    os.tmpdir(),
-    `openclaw-whisper-${Date.now()}-${crypto.randomBytes(8).toString('hex')}-${safeName}`,
-  );
-  fs.writeFileSync(tmpPath, buf);
-
-  const audioClient = new OpenAI({
-    apiKey: whisperApiKey,
-    baseURL: whisperBaseUrl,
-  });
-
-  try {
-    const params = {
-      file: fs.createReadStream(tmpPath),
-      model,
-    };
-    if (Object.prototype.hasOwnProperty.call(process.env, 'WHISPER_LANGUAGE')) {
-      const lang = String(process.env.WHISPER_LANGUAGE ?? '').trim();
-      if (lang) {
-        params.language = lang;
-      }
-    } else {
-      params.language = 'zh';
-    }
-
-    const transcription = await audioClient.audio.transcriptions.create(params);
-    const out = String(transcription?.text || '').trim();
-    if (!out) {
-      throw new Error('Whisper 返回空文本，请检查音频是否含人声或文件格式是否受支持。');
-    }
-    return out;
-  } catch (e) {
-    const status = e?.status ?? e?.response?.status;
-    const msg = String(e?.message || e || '未知错误');
-    if (status === 404 || /404/.test(msg)) {
-      throw new Error(
-        '转写接口返回 404：当前 Whisper Base URL 不支持语音转写端点。请使用支持 OpenAI `/v1/audio/transcriptions` 的地址（如 https://api.openai.com/v1），不要使用仅对话模型的网关哦～',
-      );
-    }
-    if (msg.length < 400 && !msg.includes('ECONNREFUSED')) {
-      throw new Error(`Whisper 转写失败：${msg}`);
-    }
-    throw new Error(`Whisper 转写失败：${msg.slice(0, 380)}`);
-  } finally {
-    try {
-      fs.unlinkSync(tmpPath);
-    } catch {
-      /* ignore */
-    }
-  }
-}
+【输出格式（必须严格遵守）】
+1. 先输出常规 Markdown 纪要，二级标题必须包含且仅用于业务模块：## 议题背景、## 核心结论、## 待办事项（负责人+时间）（「待办事项」小节内仍用 - [ ] 列表便于阅读）。
+2. 在全文最后单独追加一行分隔符（必须一字不差）：---STRUCTURED_TASKS_JSON---
+3. 分隔符之后仅输出一个 JSON 数组，不要 markdown 代码围栏、不要解释文字。数组元素形状示例：
+[{"content":"整理会议PPT","remind_time":"2024-05-12T10:00","assignee":"张三","location":"3号会议室"}]
+字段说明：
+- content：任务标题（必填）
+- remind_time：提醒时间，必须是机器可解析的字符串（优先 ISO8601 如 2026-05-12T15:00:00+08:00，或 yyyy-MM-dd HH:mm）；请结合用户消息中的「当前时间参考」将「明天下午三点半」等相对时间换算为绝对时间（默认按中国东八区理解）。
+- assignee、location：可选字符串，无则省略或空字符串。
+若无行动项，输出 []。
+`.trim();
 
 /** 与 server.js MAX_CHAT_SYSTEM_CONTEXT 对齐，避免 system 被过早截断丢失文献正文 */
 const MAX_CHAT_SYSTEM_ADDON_CHARS = 16000;
@@ -407,7 +332,7 @@ export function buildLongTermUserImpressionPrompt(userProfile) {
   }
 
   let block =
-    '【OpenClaw·长期用户画像 / Agent 印象】以下是你对该用户的长期观察记录（由用户在工作台「记忆面板」自行维护；请勿编造条目之外的信息；若与当场对话冲突，以用户即时表述为准）。请你在回答时务必尊重其角色与偏好，并体现出你对 TA 的了解：\n' +
+    '【会意助手·长期用户画像 / Agent 印象】以下是你对该用户的长期观察记录（由用户在工作台「记忆面板」自行维护；请勿编造条目之外的信息；若与当场对话冲突，以用户即时表述为准）。请你在回答时务必尊重其角色与偏好，并体现出你对 TA 的了解：\n' +
     `- 角色：${role || '（未填写）'}\n` +
     `- 性格倾向：${personality || '（未填写）'}\n` +
     `- 工作偏好 / 沟通风格：${preferences || '（未填写）'}\n` +
@@ -458,7 +383,7 @@ function buildThreeLayerCore(chatOptions = {}) {
 }
 
 /**
- * 单条 system：长期画像（最前）+ OpenClaw 核心人格 + 可选文献/材料附加块
+ * 单条 system：长期画像（最前）+ 会意助手核心人格 + 可选文献/材料附加块
  * @param {{ chatMode?: string, systemAddon?: string, temperatureProfile?: string, userProfile?: object, clarificationFollowUp?: boolean, skillSystemPrompt?: string, clientLocalTimeLabel?: string, companionPersona?: string, companionAddress?: string, companionCustomTraits?: string }} [chatOptions]
  * @returns {string}
  */
@@ -889,7 +814,7 @@ export async function sendChat(message, modelConfig) {
       return await requestOpenclawResponses(baseUrl, message, modelConfig);
     } catch (error) {
       if (isConnRefused(error)) {
-        throw new Error('无法连接 OpenClaw 网关');
+        throw new Error('无法连接会意助手本地网关');
       }
       throw error;
     }
@@ -928,7 +853,7 @@ export async function sendChatStream(message, modelConfig, streamOptions = {}) {
     return { response, reader };
   } catch (error) {
     if (modelConfig.type === 'openclaw' && isConnRefused(error)) {
-      throw new Error('无法连接 OpenClaw 网关');
+      throw new Error('无法连接会意助手本地网关');
     }
     throw error;
   }
@@ -959,7 +884,7 @@ export async function sendChatStreamWithBody(modelConfig, body) {
     return { response, reader };
   } catch (error) {
     if (modelConfig.type === 'openclaw' && isConnRefused(error)) {
-      throw new Error('无法连接 OpenClaw 网关');
+      throw new Error('无法连接会意助手本地网关');
     }
     throw error;
   }
@@ -1046,7 +971,7 @@ export async function pingChatModel(modelConfig, signal) {
 export const PAPER_SUMMARY_MAX_INPUT_CHARS = 52000;
 
 const SYSTEM_PAPER_REVIEWER =
-  '你是 OpenClaw 的内容总结专家，擅长在通读材料后做「类型识别 + 自适应要点提炼」。\n\n' +
+  '你是会意助手的内容总结专家，擅长在通读材料后做「类型识别 + 自适应要点提炼」。\n\n' +
   '**硬性要求**\n' +
   '1. 只依据用户提供的文本作答；若文本被截断或未包含某信息，请写「原文未交代」或「摘录中未见」，严禁编造事实、数据、人名、机构或正文中未出现的结论。\n' +
   '2. 先判断输入内容的类型（如：学术论文、新闻报道、会议纪要、产品手册、法律文本、营销文案、技术博客、其他），将**简短类型名**写入字段 `content_type`（字符串，中文 2～8 字，便于界面展示与配色）。\n' +

@@ -11,6 +11,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
     "docx-preview": "^0.3.7",
     "docxtemplater": "^3.68.6",
     "dompurify": "^3.4.2",

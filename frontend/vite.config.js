@@ -10,9 +10,9 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.svg', 'icons.svg', 'logo.png', 'pwa-192.png', 'pwa-512.png', 'pwa-512-maskable.png'],
       manifest: {
-        name: 'OpenClaw',
-        short_name: 'OpenClaw',
-        description: 'OpenClaw 智能办公助手',
+        name: '会意助手',
+        short_name: '会意',
+        description: '会意助手 智能办公助手',
         start_url: '/',
         display: 'standalone',
         background_color: '#f5f3f0',
@@ -51,6 +51,7 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:3000',
         changeOrigin: true,
+        ws: true,
         timeout: 900000,
         proxyTimeout: 900000,
         configure(proxy) {
