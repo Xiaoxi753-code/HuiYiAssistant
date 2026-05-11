@@ -1,5 +1,6 @@
 import './crash-guard.js';
 import logger from './src/utils/logger.js';
+import axios from 'axios';
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -88,6 +89,8 @@ const tempDir = resolveOptionalPath('OPENCLAW_TEMP_DIR', path.join(dataRoot, 'te
 const dbPath = resolveOptionalPath('OPENCLAW_DB_PATH', path.join(dataRoot, resolveSqliteFileName()));
 const pythonScript = path.join(__dirname, 'py_service', 'convert.py');
 const pythonBin = String(process.env.PYTHON_BIN || (process.platform === 'win32' ? 'python' : 'python3')).trim() || 'python3';
+/** 待办外联推送轮询间隔（默认 30s；仍可由环境变量调节；Webhook 地址存 system_configs） */
+const TODO_PUSH_POLL_MS = Math.min(300000, Math.max(30000, Number.parseInt(String(process.env.TODO_PUSH_POLL_MS || ''), 10) || 30000));
 
 fs.mkdirSync(uploadsDir, { recursive: true });
 fs.mkdirSync(tempDir, { recursive: true });
@@ -336,6 +339,129 @@ function ensureTodosTable() {
   }
 }
 ensureTodosTable();
+
+/** 待办推送字段：避免重复发送微信提醒 */
+function ensureTodosPushColumns() {
+  try {
+    const cols = db.prepare('PRAGMA table_info(todos)').all();
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has('pushed_wecom_at')) {
+      db.exec('ALTER TABLE todos ADD COLUMN pushed_wecom_at TEXT');
+    }
+    if (!names.has('pushed_wecom_status')) {
+      db.exec('ALTER TABLE todos ADD COLUMN pushed_wecom_status TEXT');
+    }
+  } catch (e) {
+    logger.error('[db migrate] todos push columns', e);
+    throw e;
+  }
+}
+ensureTodosPushColumns();
+
+/** 飞书待办推送去重字段 */
+function ensureTodosFeishuPushColumns() {
+  try {
+    const cols = db.prepare('PRAGMA table_info(todos)').all();
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has('pushed_feishu_at')) {
+      db.exec('ALTER TABLE todos ADD COLUMN pushed_feishu_at TEXT');
+    }
+    if (!names.has('pushed_feishu_status')) {
+      db.exec('ALTER TABLE todos ADD COLUMN pushed_feishu_status TEXT');
+    }
+  } catch (e) {
+    logger.error('[db migrate] todos feishu push columns', e);
+    throw e;
+  }
+}
+ensureTodosFeishuPushColumns();
+
+/** 待办外联：推送状态（pending → notified，与 pushed_* 列共同防止重复发送） */
+function ensureTodosNotifyStatusColumn() {
+  try {
+    const cols = db.prepare('PRAGMA table_info(todos)').all();
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has('status')) {
+      db.exec(`ALTER TABLE todos ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';`);
+    }
+    db.exec(`
+      UPDATE todos SET status = 'notified'
+      WHERE (TRIM(COALESCE(pushed_wecom_at, '')) != '' OR TRIM(COALESCE(pushed_feishu_at, '')) != '')
+        AND (status IS NULL OR status = '' OR status = 'pending');
+    `);
+  } catch (e) {
+    logger.error('[db migrate] todos notify status', e);
+    throw e;
+  }
+}
+ensureTodosNotifyStatusColumn();
+
+/** 推送失败重试计数，超过阈值后不再进入调度，避免卡死队列 */
+const TODO_PUSH_MAX_RETRY = 20;
+const TODO_REMIND_CANDIDATE_SQL_LIMIT = 200;
+
+function ensureTodosPushRetryCountColumn() {
+  try {
+    const cols = db.prepare('PRAGMA table_info(todos)').all();
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has('push_retry_count')) {
+      db.exec('ALTER TABLE todos ADD COLUMN push_retry_count INTEGER NOT NULL DEFAULT 0');
+    }
+  } catch (e) {
+    logger.error('[db migrate] todos push_retry_count', e);
+    throw e;
+  }
+}
+ensureTodosPushRetryCountColumn();
+
+/** 强一致键名（INSERT OR REPLACE）；旧键仅用于读取兼容 */
+const WEBHOOK_KEY_WECOM = 'wecom_webhook';
+const WEBHOOK_KEY_FEISHU = 'feishu_webhook';
+const WEBHOOK_KEY_WECOM_LEGACY = 'webhook_wecom_url';
+const WEBHOOK_KEY_FEISHU_LEGACY = 'webhook_feishu_url';
+
+function ensureSystemConfigsTable() {
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS system_configs (
+        config_key TEXT PRIMARY KEY,
+        config_value TEXT
+      );
+    `);
+  } catch (e) {
+    logger.error('[db migrate] system_configs', e);
+    throw e;
+  }
+}
+ensureSystemConfigsTable();
+
+function getSystemConfig(key) {
+  const row = db.prepare('SELECT config_value FROM system_configs WHERE config_key = ?').get(String(key || ''));
+  return row && row.config_value != null ? String(row.config_value).trim() : '';
+}
+
+function setSystemConfig(key, value) {
+  db.prepare('INSERT OR REPLACE INTO system_configs (config_key, config_value) VALUES (?, ?)').run(
+    String(key || ''),
+    String(value ?? ''),
+  );
+}
+
+function getWebhookWecomUrl() {
+  const v = getSystemConfig(WEBHOOK_KEY_WECOM);
+  if (v) {
+    return v;
+  }
+  return getSystemConfig(WEBHOOK_KEY_WECOM_LEGACY);
+}
+
+function getWebhookFeishuUrl() {
+  const v = getSystemConfig(WEBHOOK_KEY_FEISHU);
+  if (v) {
+    return v;
+  }
+  return getSystemConfig(WEBHOOK_KEY_FEISHU_LEGACY);
+}
 
 /** 对话会话与消息（多会话历史） */
 function ensureChatSessionsTables() {
@@ -2481,6 +2607,46 @@ app.get('/api/todos', (req, res) => {
   }
 });
 
+app.post('/api/todos', (req, res) => {
+  try {
+    const { userEmail, title, remindAt, notes, source } = req.body || {};
+    const email = String(userEmail || '').trim();
+    const t = String(title || '').trim().slice(0, 500);
+    const remind = String(remindAt || '').trim().slice(0, 40);
+    const memo = String(notes || '').trim().slice(0, 2000);
+    const src = String(source || 'manual').trim().slice(0, 40) || 'manual';
+    if (!email) {
+      return res.status(400).json({ success: false, message: '需要 userEmail' });
+    }
+    if (!t) {
+      return res.status(400).json({ success: false, message: '需要 title' });
+    }
+    if (!remind || Number.isNaN(Date.parse(remind))) {
+      return res.status(400).json({ success: false, message: 'remindAt 无效' });
+    }
+    const info = db
+      .prepare(
+        `INSERT INTO todos (user_email, title, remind_at, notes, source, done)
+         VALUES (?, ?, ?, ?, ?, 0)`,
+      )
+      .run(email, t, remind, memo, src);
+    res.json({
+      success: true,
+      item: {
+        id: Number(info.lastInsertRowid),
+        title: t,
+        remindAt: remind,
+        notes: memo,
+        source: src,
+        done: 0,
+      },
+    });
+  } catch (error) {
+    logger.error('[todos POST]', error);
+    res.status(500).json({ success: false, message: '新增待办失败' });
+  }
+});
+
 app.get('/api/todos/upcoming', (req, res) => {
   try {
     const email = String(req.query.email || '').trim();
@@ -2584,6 +2750,492 @@ app.delete('/api/todos/:id', (req, res) => {
     res.status(500).json({ success: false, message: '删除失败' });
   }
 });
+
+function buildWecomTodoText(row) {
+  const title = String(row.title || '').trim() || '待办提醒';
+  const time = String(row.remindAt || '').trim();
+  const notes = String(row.notes || '').trim();
+  const who = String(row.userEmail || '').trim();
+  const parts = [`⏰ 待办提醒`, `事项：${title}`];
+  if (time) {
+    parts.push(`时间：${time}`);
+  }
+  if (notes) {
+    parts.push(`备注：${notes}`);
+  }
+  if (who) {
+    parts.push(`用户：${who}`);
+  }
+  return parts.join('\n');
+}
+
+/** 企微 Markdown 字段：单行展示，避免换行破坏机器人解析 */
+function sanitizeWecomMarkdownField(s, maxLen = 800) {
+  return String(s ?? '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\n+/g, ' ')
+    .trim()
+    .slice(0, maxLen);
+}
+
+/**
+ * 严格遵守企微群机器人 markdown 消息体（msgtype + markdown.content）
+ * @param {{ title?: string, remindAt?: string }} row
+ */
+function buildWecomTodoMarkdownPayload(row) {
+  const task = sanitizeWecomMarkdownField(row.title || '') || '待办提醒';
+  const remindTime = sanitizeWecomMarkdownField(row.remindAt || '') || '—';
+  const content = `**<font color="warning">⏰ 待办提醒触发</font>**\n> **任务**：${task}\n> **预定时间**：${remindTime}\n\n*来自 OpenClaw 智能助理*`;
+  return {
+    msgtype: 'markdown',
+    markdown: { content },
+  };
+}
+
+const WEBHOOK_HTTP_TIMEOUT_MS = 5000;
+
+async function httpPostJsonWithTimeout(url, body, timeoutMs = WEBHOOK_HTTP_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const tid = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(tid);
+  }
+}
+
+async function sendWecomText(webhookUrl, content) {
+  try {
+    const res = await httpPostJsonWithTimeout(webhookUrl, { msgtype: 'text', text: { content } });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || Number(data.errcode || 0) !== 0) {
+      throw new Error(data.errmsg || `HTTP ${res.status}`);
+    }
+    return true;
+  } catch (e) {
+    if (e?.name === 'AbortError') {
+      throw new Error('企业微信 Webhook 请求超时');
+    }
+    throw e;
+  }
+}
+
+/**
+ * 定时推送主路径：企微 markdown（axios + 超时），失败时抛出并在 catch 中记录完整响应体
+ * @param {string} wecomUrl
+ * @param {{ title?: string, remindAt?: string }} row
+ */
+async function sendWecomTodoMarkdownWebhook(wecomUrl, row) {
+  const wecomPayload = buildWecomTodoMarkdownPayload(row);
+  try {
+    const res = await axios.post(wecomUrl, wecomPayload, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: WEBHOOK_HTTP_TIMEOUT_MS,
+      validateStatus: () => true,
+    });
+    const data = res.data;
+    const errcode = data != null && typeof data === 'object' ? Number(data.errcode ?? 0) : 0;
+    if (res.status < 200 || res.status >= 300) {
+      logger.error('[todos/wecom] HTTP 非 2xx', {
+        status: res.status,
+        responseData: data,
+      });
+      throw new Error(`HTTP ${res.status}: ${typeof data === 'string' ? data : JSON.stringify(data)}`);
+    }
+    if (errcode !== 0) {
+      logger.error('[todos/wecom] 企微业务错误', { errcode, errmsg: data?.errmsg, responseData: data });
+      throw new Error(String(data?.errmsg || `errcode=${errcode}`));
+    }
+    return true;
+  } catch (err) {
+    const responseData = err.response?.data;
+    logger.error('[todos/wecom] webhook axios 请求失败', {
+      message: err.message,
+      code: err.code,
+      httpStatus: err.response?.status,
+      responseData: responseData !== undefined ? responseData : null,
+      isTimeout: err.code === 'ECONNABORTED',
+    });
+    if (err.code === 'ECONNABORTED') {
+      throw new Error('企业微信 Webhook 请求超时');
+    }
+    if (responseData !== undefined) {
+      const serialized =
+        typeof responseData === 'string' ? responseData : JSON.stringify(responseData);
+      throw new Error(serialized.slice(0, 800) || err.message);
+    }
+    throw err;
+  }
+}
+
+/** 飞书群机器人 Webhook（文本消息） */
+async function sendFeishuText(webhookUrl, content) {
+  try {
+    const res = await httpPostJsonWithTimeout(webhookUrl, {
+      msg_type: 'text',
+      content: { text: content },
+    });
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      data = {};
+    }
+    if (!res.ok) {
+      throw new Error(data.msg || data.StatusMessage || `HTTP ${res.status}`);
+    }
+    const code = data.code ?? data.StatusCode;
+    if (code !== undefined && Number(code) !== 0) {
+      throw new Error(data.msg || data.StatusMessage || `飞书返回 code=${code}`);
+    }
+    return true;
+  } catch (e) {
+    if (e?.name === 'AbortError') {
+      throw new Error('飞书 Webhook 请求超时');
+    }
+    throw e;
+  }
+}
+
+app.get('/api/configs/webhooks', (_req, res) => {
+  try {
+    res.json({
+      success: true,
+      wecom_url: getWebhookWecomUrl(),
+      feishu_url: getWebhookFeishuUrl(),
+    });
+  } catch (error) {
+    logger.error('[configs/webhooks GET]', error);
+    res.status(500).json({ success: false, message: '读取配置失败' });
+  }
+});
+
+app.post('/api/configs/webhooks', (req, res) => {
+  try {
+    const wecom = String(req.body?.wecom_url ?? '').trim().slice(0, 4000);
+    const feishu = String(req.body?.feishu_url ?? '').trim().slice(0, 4000);
+    db.prepare('INSERT OR REPLACE INTO system_configs (config_key, config_value) VALUES (?, ?)').run(WEBHOOK_KEY_WECOM, wecom);
+    db.prepare('INSERT OR REPLACE INTO system_configs (config_key, config_value) VALUES (?, ?)').run(WEBHOOK_KEY_FEISHU, feishu);
+    res.json({ success: true });
+  } catch (error) {
+    logger.error('[configs/webhooks POST]', error);
+    res.status(500).json({ success: false, message: '保存失败' });
+  }
+});
+
+/** 将 outbound Webhook 错误整理为前端可读文案 */
+function formatOutboundWebhookError(err) {
+  if (err == null) {
+    return '未知错误';
+  }
+  const code = err.code;
+  if (code === 'ENOTFOUND') {
+    return '域名解析失败（ENOTFOUND）：无法解析 Webhook 主机名，请检查 URL 或 DNS。';
+  }
+  if (code === 'ECONNREFUSED') {
+    return '连接被拒绝（ECONNREFUSED）：目标端口未开放或服务不可达。';
+  }
+  if (code === 'ETIMEDOUT' || code === 'ECONNABORTED') {
+    return '请求超时或网络中断：请检查网络或防火墙。';
+  }
+  if (code === 'CERT_HAS_EXPIRED' || code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE') {
+    return `TLS 证书错误（${code}）：${err.message || ''}`;
+  }
+  const st = err.response?.status;
+  const data = err.response?.data;
+  const dataStr =
+    data === undefined ? '' : typeof data === 'string' ? data : JSON.stringify(data);
+  if (st === 404) {
+    return `HTTP 404：Webhook 地址不存在或 key 无效。服务端返回：${dataStr || err.message || ''}`;
+  }
+  if (st === 400) {
+    return `HTTP 400：请求格式错误或参数无效。服务端返回：${dataStr || err.message || ''}`;
+  }
+  if (st != null) {
+    return `HTTP ${st}：${dataStr || err.message || '无响应体'}`;
+  }
+  return String(err.message || err);
+}
+
+/**
+ * 即时链路测试：使用请求体中的 url（企微 text / 飞书 text）
+ * POST body: { url: string, channel?: 'wecom'|'feishu' }
+ */
+app.post('/api/configs/test-push', async (req, res) => {
+  const url = String(req.body?.url ?? '').trim().slice(0, 4000);
+  const channel = String(req.body?.channel ?? 'wecom').toLowerCase().trim();
+  if (!url) {
+    return res.status(400).json({ success: false, message: '缺少 url：请先填写 Webhook 地址' });
+  }
+  const text = 'OpenClaw 链路测试成功！';
+  try {
+    if (channel === 'feishu') {
+      const r = await axios.post(
+        url,
+        { msg_type: 'text', content: { text } },
+        {
+          headers: { 'Content-Type': 'application/json' },
+          timeout: WEBHOOK_HTTP_TIMEOUT_MS,
+          validateStatus: () => true,
+        },
+      );
+      const data = r.data;
+      const code = data != null && typeof data === 'object' ? Number(data.code ?? data.StatusCode ?? 0) : 0;
+      if (r.status === 404) {
+        return res.status(400).json({
+          success: false,
+          message: formatOutboundWebhookError({ response: { status: 404, data }, message: 'HTTP 404' }),
+        });
+      }
+      if (r.status < 200 || r.status >= 300) {
+        return res.status(400).json({
+          success: false,
+          message: `HTTP ${r.status}：${typeof data === 'string' ? data : JSON.stringify(data)}`,
+        });
+      }
+      if (code !== 0) {
+        logger.error('[configs/test-push] 飞书业务错误', { responseData: data });
+        return res.status(400).json({
+          success: false,
+          message: `飞书接口返回错误 code=${code}：${data?.msg || data?.StatusMessage || JSON.stringify(data)}`,
+        });
+      }
+      return res.json({ success: true });
+    }
+    const wecomPayload = { msgtype: 'text', text: { content: text } };
+    const r = await axios.post(url, wecomPayload, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: WEBHOOK_HTTP_TIMEOUT_MS,
+      validateStatus: () => true,
+    });
+    const data = r.data;
+    const errcode = data != null && typeof data === 'object' ? Number(data.errcode ?? 0) : 0;
+    if (r.status === 404) {
+      return res.status(400).json({
+        success: false,
+        message: formatOutboundWebhookError({ response: { status: 404, data }, message: 'HTTP 404' }),
+      });
+    }
+    if (r.status < 200 || r.status >= 300) {
+      logger.error('[configs/test-push] 企微 HTTP 非 2xx', { status: r.status, responseData: data });
+      return res.status(400).json({
+        success: false,
+        message: `HTTP ${r.status}：${typeof data === 'string' ? data : JSON.stringify(data)}`,
+      });
+    }
+    if (errcode !== 0) {
+      logger.error('[configs/test-push] 企微业务错误', { errcode, errmsg: data?.errmsg, responseData: data });
+      return res.status(400).json({
+        success: false,
+        message: `企业微信返回 errcode=${errcode}：${data?.errmsg || JSON.stringify(data)}`,
+      });
+    }
+    return res.json({ success: true });
+  } catch (err) {
+    const responseData = err.response?.data;
+    logger.error('[configs/test-push] 请求异常', {
+      message: err.message,
+      code: err.code,
+      httpStatus: err.response?.status,
+      responseData: responseData !== undefined ? responseData : null,
+    });
+    return res.status(400).json({ success: false, message: formatOutboundWebhookError(err) });
+  }
+});
+
+app.post('/api/configs/webhooks/test', async (req, res) => {
+  try {
+    const channel = String(req.body?.channel || '').toLowerCase().trim();
+    let url = String(req.body?.url || '').trim().slice(0, 4000);
+    if (!url) {
+      if (channel === 'wecom') {
+        url = getWebhookWecomUrl();
+      } else if (channel === 'feishu') {
+        url = getWebhookFeishuUrl();
+      }
+    }
+    if (!url) {
+      return res.status(400).json({ success: false, message: '请先填写 Webhook URL 或保存配置' });
+    }
+    const text = `OpenClaw 外联推送测试 · ${new Date().toLocaleString('zh-CN', { hour12: false })}`;
+    if (channel === 'wecom') {
+      await sendWecomText(url, text);
+    } else if (channel === 'feishu') {
+      await sendFeishuText(url, text);
+    } else {
+      return res.status(400).json({ success: false, message: 'channel 须为 wecom 或 feishu' });
+    }
+    res.json({ success: true });
+  } catch (error) {
+    logger.error('[configs/webhooks/test] 推送失败', {
+      message: error?.message,
+      code: error?.code,
+      httpStatus: error?.response?.status,
+      responseData: error?.response?.data,
+      stack: error?.stack,
+    });
+    res.status(400).json({ success: false, message: String(error?.message || error || '推送失败') });
+  }
+});
+
+/** 将待办 remind_at 解析为 UTC 毫秒，与 Date.now() 同源比较，避免字符串与 ISO 混排导致误触发/漏触发 */
+function parseRemindAtToUtcMs(remindAtStr) {
+  const raw = String(remindAtStr ?? '').trim();
+  if (!raw) {
+    return NaN;
+  }
+  let ms = Date.parse(raw);
+  if (Number.isFinite(ms)) {
+    return ms;
+  }
+  const m = raw.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::(\d{2}))?/);
+  if (m) {
+    const secTail = m[3] != null ? `:${m[3]}` : ':00';
+    ms = Date.parse(`${m[1]}T${m[2]}${secTail}.000Z`);
+    if (Number.isFinite(ms)) {
+      return ms;
+    }
+    ms = Date.parse(`${m[1]}T${m[2]}${secTail}`);
+    if (Number.isFinite(ms)) {
+      return ms;
+    }
+  }
+  return NaN;
+}
+
+function isRemindDueNow(remindAtStr, nowMs = Date.now()) {
+  const t = parseRemindAtToUtcMs(remindAtStr);
+  if (!Number.isFinite(t)) {
+    return false;
+  }
+  return t <= nowMs;
+}
+
+let todoPushInFlight = false;
+async function runTodoWebhookPush() {
+  logger.info(`[调度器] 正在扫描待办... 当前系统时间：${new Date().toLocaleString('zh-CN', { hour12: false })}`);
+  if (todoPushInFlight) {
+    logger.info('[调度器] 上一轮推送尚未结束，跳过本轮');
+    return;
+  }
+  let wecomUrl = '';
+  let feishuUrl = '';
+  try {
+    wecomUrl = getWebhookWecomUrl();
+    feishuUrl = getWebhookFeishuUrl();
+  } catch (readErr) {
+    logger.warn('[todos/webhooks] read system_configs failed', readErr?.message || readErr);
+    return;
+  }
+  if (!wecomUrl && !feishuUrl) {
+    logger.info('[调度器] Webhook URL：企微与飞书均为空，跳过推送');
+    return;
+  }
+  logger.info(
+    `[调度器] 正在获取 Webhook URL... 企业微信：${wecomUrl ? '已获取' : '为空'}；飞书：${feishuUrl ? '已获取' : '为空'}`,
+  );
+  todoPushInFlight = true;
+  const nowMs = Date.now();
+  try {
+    const candidates = db
+      .prepare(
+        `SELECT id, user_email AS userEmail, title, remind_at AS remindAt, notes,
+                pushed_wecom_at AS pushedWecomAt, pushed_feishu_at AS pushedFeishuAt,
+                COALESCE(push_retry_count, 0) AS pushRetryCount
+         FROM todos
+         WHERE done = 0
+           AND (status IS NULL OR status = '' OR status = 'pending')
+           AND COALESCE(push_retry_count, 0) < ?
+           AND (
+             (? != '' AND (pushed_wecom_at IS NULL OR TRIM(pushed_wecom_at) = ''))
+             OR (? != '' AND (pushed_feishu_at IS NULL OR TRIM(pushed_feishu_at) = ''))
+           )
+         ORDER BY remind_at ASC LIMIT ?`,
+      )
+      .all(TODO_PUSH_MAX_RETRY, wecomUrl, feishuUrl, TODO_REMIND_CANDIDATE_SQL_LIMIT);
+    logger.info(`[调度器] 从数据库找到 ${candidates.length} 条待办任务`);
+    const due = [];
+    for (const row of candidates) {
+      if (!isRemindDueNow(row.remindAt, nowMs)) {
+        continue;
+      }
+      due.push(row);
+      if (due.length >= 25) {
+        break;
+      }
+    }
+    if (due.length > 0) {
+      logger.info('[调度器] 时间条件命中，待推送条数', {
+        count: due.length,
+        wecomUrlState: wecomUrl ? '已获取' : '为空',
+        feishuUrlState: feishuUrl ? '已获取' : '为空',
+      });
+    }
+    for (const row of due) {
+      const textBody = buildWecomTodoText(row);
+      const needWe = Boolean(wecomUrl);
+      const needFe = Boolean(feishuUrl);
+      let wecomOk = !needWe || Boolean(String(row.pushedWecomAt || '').trim());
+      let feishuOk = !needFe || Boolean(String(row.pushedFeishuAt || '').trim());
+      if (needWe && !wecomOk) {
+        try {
+          await sendWecomTodoMarkdownWebhook(wecomUrl, row);
+          db.prepare(`UPDATE todos SET pushed_wecom_at = datetime('now'), pushed_wecom_status = ? WHERE id = ?`).run('ok', row.id);
+          wecomOk = true;
+        } catch (error) {
+          const msg = String(error?.message || error || 'push failed').slice(0, 200);
+          db.prepare('UPDATE todos SET pushed_wecom_status = ? WHERE id = ?').run(msg, row.id);
+          logger.error('[todos/wecom] 单条待办推送失败', {
+            todoId: row.id,
+            errorMessage: error?.message,
+            stack: error?.stack,
+            responseData: error?.response?.data,
+          });
+        }
+      }
+      if (needFe && !feishuOk) {
+        try {
+          await sendFeishuText(feishuUrl, textBody);
+          db.prepare(`UPDATE todos SET pushed_feishu_at = datetime('now'), pushed_feishu_status = ? WHERE id = ?`).run('ok', row.id);
+          feishuOk = true;
+        } catch (error) {
+          const msg = String(error?.message || error || 'push failed').slice(0, 200);
+          db.prepare('UPDATE todos SET pushed_feishu_status = ? WHERE id = ?').run(msg, row.id);
+          logger.error('[todos/feishu] 单条待办推送失败', {
+            todoId: row.id,
+            errorMessage: error?.message,
+            stack: error?.stack,
+            responseData: error?.response?.data,
+          });
+        }
+      }
+      if ((!needWe || wecomOk) && (!needFe || feishuOk)) {
+        db.prepare(`UPDATE todos SET status = 'notified', push_retry_count = 0 WHERE id = ? AND done = 0`).run(row.id);
+        logger.info('[调度器] 待办已标记为已通知', { todoId: row.id });
+      } else {
+        db.prepare(`UPDATE todos SET push_retry_count = COALESCE(push_retry_count, 0) + 1 WHERE id = ?`).run(row.id);
+        const cnt = db.prepare('SELECT push_retry_count AS c FROM todos WHERE id = ?').get(row.id);
+        logger.info('[调度器] 待办推送未完全成功，已增加 push_retry_count', {
+          todoId: row.id,
+          pushRetryCount: cnt?.c,
+        });
+      }
+    }
+  } catch (error) {
+    logger.error('[todos/webhooks] scheduler failed', {
+      message: error?.message,
+      stack: error?.stack,
+      responseData: error?.response?.data,
+    });
+  } finally {
+    todoPushInFlight = false;
+  }
+}
 
 /** —— 对话会话历史 —— */
 app.get('/api/chat/sessions', (req, res) => {
@@ -3718,6 +4370,14 @@ app.use((err, _req, res, _next) => {
 
 const server = app.listen(port, () => {
   logger.info(`✅ OpenClaw 后端服务已启动: http://localhost:${port}`);
+  logger.info(`[todos/webhooks] 定时推送已启用（间隔 ${TODO_PUSH_POLL_MS}ms，URL 来自 system_configs；未配置则静默跳过）`);
+  setTimeout(() => {
+    void runTodoWebhookPush();
+  }, 3000);
+  setInterval(() => {
+    logger.info(`[调度器] setInterval 触发，系统时间：${new Date().toLocaleString('zh-CN', { hour12: false })}`);
+    void runTodoWebhookPush();
+  }, TODO_PUSH_POLL_MS);
 });
 /** 上传 + Mock ASR + 大模型纪要可能较慢，避免 Node 默认 ~2min 套接字超时过早断开 */
 server.timeout = 900000;

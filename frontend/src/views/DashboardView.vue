@@ -76,6 +76,7 @@ const tabTitles = {
   identity: '多身份切换',
   reminders: '主动提醒推送',
   apiConfig: 'API & 模型配置',
+  webhookConfig: '外联推送配置',
 }
 
 const pageTitle = computed(() => tabTitles[currentTab.value] || '工作台')
@@ -295,7 +296,8 @@ async function syncDashboardData() {
     await loadDashboardStats()
     await loadMyTemplates()
     await loadTemplateFillRecords()
-    ElMessage.success('已刷新统计、模板列表与生成历史')
+    await fetchWebhookConfigs()
+    ElMessage.success('已刷新统计、模板列表、生成历史与外联推送配置')
 }
 
 async function loadDashboardStats() {
@@ -542,7 +544,12 @@ const todoDrawerVisible = ref(false)
 const todosDrawerList = ref([])
 const todosDrawerLoading = ref(false)
 const TODO_NOTIFY_STORAGE_KEY = 'openclaw_todo_notified_v1'
+const TODO_ALERT_STORAGE_KEY = 'openclaw_todo_alerted_v1'
 let todoPollTimer = null
+const dueTodoAlerts = ref([])
+const dueTodoAlertVisible = ref(false)
+const reminderForm = ref({ title: '', remindAt: '', notes: '' })
+const reminderSaving = ref(false)
 
 /** 沉浸页悬浮待办铃铛：拖拽、边界、localStorage 记忆 */
 const OPENCLAW_BELL_POSITION_KEY = 'openclaw_bell_position'
@@ -762,6 +769,82 @@ function saveWhisperAsrToStorage() {
     }
     localStorage.setItem(WHISPER_ASR_STORAGE_KEY, JSON.stringify(payload))
     ElMessage.success('语音识别 (ASR) 配置已保存到本机，会议转写时会自动随请求发送到服务器。')
+}
+
+/** 外联推送：企业微信 / 飞书 Webhook，存服务端 SQLite system_configs */
+const webhookWecomUrl = ref('')
+const webhookFeishuUrl = ref('')
+const webhookConfigLoading = ref(false)
+const webhookSaveLoading = ref(false)
+const webhookTestWecomLoading = ref(false)
+const webhookTestFeishuLoading = ref(false)
+
+async function fetchWebhookConfigs() {
+    webhookConfigLoading.value = true
+    try {
+        const r = await fetch('/api/configs/webhooks')
+        const d = await r.json().catch(() => ({}))
+        if (!r.ok || !d.success) {
+            throw new Error(d.message || `HTTP ${r.status}`)
+        }
+        webhookWecomUrl.value = String(d.wecom_url || '')
+        webhookFeishuUrl.value = String(d.feishu_url || '')
+    } catch (e) {
+        ElMessage.error(String(e?.message || e || '加载外联配置失败'))
+    } finally {
+        webhookConfigLoading.value = false
+    }
+}
+
+async function saveWebhookConfigs() {
+    webhookSaveLoading.value = true
+    try {
+        const r = await fetch('/api/configs/webhooks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                wecom_url: String(webhookWecomUrl.value || '').trim(),
+                feishu_url: String(webhookFeishuUrl.value || '').trim(),
+            }),
+        })
+        const d = await r.json().catch(() => ({}))
+        if (!r.ok || !d.success) {
+            throw new Error(d.message || `HTTP ${r.status}`)
+        }
+        ElMessage.success('保存成功')
+    } catch (e) {
+        ElMessage.error(String(e?.message || e || '保存失败'))
+    } finally {
+        webhookSaveLoading.value = false
+    }
+}
+
+/** 外联：POST /api/configs/test-push，校验当前输入框中的 URL 是否可用 */
+async function testWebhookPush(channel) {
+    const ch = channel === 'feishu' ? 'feishu' : 'wecom'
+    const url = ch === 'feishu' ? String(webhookFeishuUrl.value || '').trim() : String(webhookWecomUrl.value || '').trim()
+    if (ch === 'feishu') {
+        webhookTestFeishuLoading.value = true
+    } else {
+        webhookTestWecomLoading.value = true
+    }
+    try {
+        const r = await fetch('/api/configs/test-push', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url, channel: ch }),
+        })
+        const d = await r.json().catch(() => ({}))
+        if (!r.ok || !d.success) {
+            throw new Error(d.message || `HTTP ${r.status}`)
+        }
+        ElMessage.success('OpenClaw 链路测试消息已发送，请到群内查看')
+    } catch (e) {
+        ElMessage.error(String(e?.message || e || '测试推送失败'))
+    } finally {
+        webhookTestFeishuLoading.value = false
+        webhookTestWecomLoading.value = false
+    }
 }
 
 function getInitialChatMessages() {
@@ -1189,6 +1272,9 @@ watch(currentTab, (tab) => {
         loadWhisperAsrFromStorage()
         fetchModelConfigs()
     }
+    if (tab === 'webhookConfig') {
+        void fetchWebhookConfigs()
+    }
     if (tab === 'chat') {
         loadUserImpressionProfile()
         fetchSavedSkills()
@@ -1247,6 +1333,44 @@ function getTodoNotifiedIds() {
     }
 }
 
+function getTodoAlertedIds() {
+    try {
+        const raw = localStorage.getItem(TODO_ALERT_STORAGE_KEY)
+        const a = raw ? JSON.parse(raw) : []
+        return new Set(Array.isArray(a) ? a.map((x) => Number(x)).filter((n) => Number.isFinite(n)) : [])
+    } catch {
+        return new Set()
+    }
+}
+
+function markTodoAlerted(id) {
+    const s = getTodoAlertedIds()
+    s.add(Number(id))
+    localStorage.setItem(TODO_ALERT_STORAGE_KEY, JSON.stringify([...s].slice(-400)))
+}
+
+function updateDueTodoAlerts() {
+    const now = Date.now()
+    const alerted = getTodoAlertedIds()
+    const due = [...upcomingOverdue.value, ...upcomingSoon.value].filter((t) => {
+        const dueAt = Date.parse(t.remindAt)
+        if (!Number.isFinite(dueAt) || dueAt > now) {
+            return false
+        }
+        return !alerted.has(t.id)
+    })
+    dueTodoAlerts.value = due
+    dueTodoAlertVisible.value = due.length > 0
+}
+
+function dismissDueTodoAlerts() {
+    for (const t of dueTodoAlerts.value) {
+        markTodoAlerted(t.id)
+    }
+    dueTodoAlerts.value = []
+    dueTodoAlertVisible.value = false
+}
+
 function markTodoNotified(id) {
     const s = getTodoNotifiedIds()
     s.add(Number(id))
@@ -1271,6 +1395,7 @@ async function loadTodosUpcoming() {
         /* ignore */
     }
     void loadTodoPendingCount()
+    updateDueTodoAlerts()
 }
 
 async function loadTodoPendingCount() {
@@ -1381,6 +1506,46 @@ function checkDueTodoNotifications() {
         } catch {
             /* ignore */
         }
+    }
+    updateDueTodoAlerts()
+}
+
+async function submitReminder() {
+    const email = userStore.user?.email
+    if (!email) {
+        ElMessage.warning('请先登录后新增提醒')
+        return
+    }
+    const title = String(reminderForm.value.title || '').trim()
+    const remindAt = String(reminderForm.value.remindAt || '').trim()
+    const notes = String(reminderForm.value.notes || '').trim()
+    if (!title) {
+        ElMessage.warning('请填写待办标题')
+        return
+    }
+    if (!remindAt) {
+        ElMessage.warning('请选择提醒时间')
+        return
+    }
+    reminderSaving.value = true
+    try {
+        const r = await fetch('/api/todos', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userEmail: email, title, remindAt, notes, source: 'manual' }),
+        })
+        const d = await r.json().catch(() => ({}))
+        if (!r.ok || !d.success) {
+            throw new Error(d.message || `HTTP ${r.status}`)
+        }
+        reminderForm.value = { title: '', remindAt: '', notes: '' }
+        ElMessage.success('已新增提醒')
+        void loadTodosUpcoming()
+        void loadTodoPendingCount()
+    } catch (e) {
+        ElMessage.error(String(e?.message || e || '新增提醒失败'))
+    } finally {
+        reminderSaving.value = false
     }
 }
 
@@ -1834,6 +1999,7 @@ onMounted(() => {
         loadWhisperAsrFromStorage()
         loadChatPersonaLocalStorage()
     }
+    void fetchWebhookConfigs()
     fetchSavedSkills()
     void loadDashboardStats()
     void loadUserImpressionProfile()
@@ -4157,6 +4323,21 @@ async function handleExportWord() {
                 </div>
             </div>
 
+            <div v-if="dueTodoAlertVisible" class="dashboard-reminder-bar" role="alert">
+                <span class="dashboard-reminder-label dashboard-reminder-label--overdue">到点提醒</span>
+                <span
+                    v-for="t in dueTodoAlerts.slice(0, 3)"
+                    :key="`due-${t.id}`"
+                    class="dashboard-reminder-chip dashboard-reminder-chip--overdue"
+                    :title="t.title"
+                >{{ t.title }}</span>
+                <span v-if="dueTodoAlerts.length > 3" class="dashboard-reminder-chip">还有 {{ dueTodoAlerts.length - 3 }} 项</span>
+                <div class="dashboard-reminder-actions">
+                    <button type="button" class="btn btn-outline btn-xs" @click="openTodoDrawer">查看待办</button>
+                    <button type="button" class="btn btn-ghost btn-xs" @click="dismissDueTodoAlerts">知道了</button>
+                </div>
+            </div>
+
             <el-drawer v-model="todoDrawerVisible" title="待办事项" direction="rtl" size="420px" append-to-body class="todo-drawer">
                 <p v-if="!userStore.user?.email" class="todo-drawer-guest">登录后查看从对话与会议纪要中静默提取的待办。</p>
                 <template v-else>
@@ -5332,16 +5513,72 @@ async function handleExportWord() {
 <!-- ===== TAB: REMINDERS ===== -->
 <div v-show="currentTab === 'reminders'" class="tab-content" id="tabReminders">
     <div class="cards-grid">
-        <div class="card" style="grid-column:1/-1;max-width:600px;">
+        <div class="card" style="grid-column:1/-1;max-width:760px;">
             <div class="card-icon amber">&#9200;</div>
             <h3>主动提醒与推送</h3>
-            <p>从会议纪要自动提取待办，定时推送提醒</p>
-            <div style="background:var(--warning-light);border:1px solid #fde68a;border-radius:var(--radius);padding:12px 16px;margin-top:10px;">
-                <strong>下午3:00</strong> — 产品评审会（自动从纪要提取）<br>
-                <strong>明天9:00</strong> — 提交文献综述初稿<br>
-                <strong>周五</strong> — 周报截止提醒
+            <p>从会议纪要与对话自动提取待办，并在到点时推送（微信优先）。</p>
+            <div class="reminder-form">
+                <div class="reminder-form-row">
+                    <label class="sr-only" for="reminder-title">待办标题</label>
+                    <input
+                        id="reminder-title"
+                        v-model="reminderForm.title"
+                        type="text"
+                        class="reminder-input"
+                        placeholder="待办标题，例如：提交周报"
+                    />
+                </div>
+                <div class="reminder-form-row">
+                    <label class="sr-only" for="reminder-time">提醒时间</label>
+                    <input
+                        id="reminder-time"
+                        v-model="reminderForm.remindAt"
+                        type="datetime-local"
+                        class="reminder-input"
+                    />
+                </div>
+                <div class="reminder-form-row">
+                    <label class="sr-only" for="reminder-notes">备注</label>
+                    <textarea
+                        id="reminder-notes"
+                        v-model="reminderForm.notes"
+                        class="reminder-input reminder-textarea"
+                        rows="2"
+                        placeholder="备注（可选）"
+                    ></textarea>
+                </div>
+                <button
+                    class="btn btn-accent btn-sm"
+                    style="width:100%;"
+                    type="button"
+                    :disabled="reminderSaving"
+                    @click="submitReminder"
+                >{{ reminderSaving ? '保存中…' : '+ 手动添加提醒' }}</button>
             </div>
-            <button class="btn btn-accent btn-sm mt-2" style="width:100%;">+ 手动添加提醒</button>
+            <div class="reminder-list">
+                <p v-if="!userStore.user?.email" class="todo-drawer-guest">登录后查看与新增提醒。</p>
+                <div v-else-if="upcomingSoon.length === 0 && upcomingOverdue.length === 0" class="todo-drawer-empty">暂无提醒</div>
+                <div v-else class="reminder-section">
+                    <div v-if="upcomingOverdue.length" class="reminder-group">
+                        <div class="reminder-group-title">已到点 / 逾期</div>
+                        <ul class="reminder-items">
+                            <li v-for="t in upcomingOverdue" :key="`overdue-${t.id}`">
+                                <strong>{{ t.title }}</strong>
+                                <span>{{ t.remindAt }}</span>
+                            </li>
+                        </ul>
+                    </div>
+                    <div v-if="upcomingSoon.length" class="reminder-group">
+                        <div class="reminder-group-title">即将到来</div>
+                        <ul class="reminder-items">
+                            <li v-for="t in upcomingSoon" :key="`soon-${t.id}`">
+                                <strong>{{ t.title }}</strong>
+                                <span>{{ t.remindAt }}</span>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 </div>
@@ -5445,6 +5682,80 @@ async function handleExportWord() {
             </div>
         </div>
         <div v-if="modelConfigs.length === 0" class="model-config-empty">暂无模型配置。请点击「新增配置」，或在首次启动时编辑数据库中的默认占位项并填写密钥。</div>
+    </div>
+</div>
+
+<!-- ===== TAB: 外联推送配置 ===== -->
+<div v-show="currentTab === 'webhookConfig'" class="tab-content webhook-config-tab" id="tabWebhookConfig">
+    <p class="webhook-config-lead">
+        待办到达提醒时间后，服务端会按下方 Webhook 向<strong>企业微信</strong>与<strong>飞书</strong>推送（轮询间隔由服务器环境变量
+        <code>TODO_PUSH_POLL_MS</code> 控制）。地址保存在服务器数据库，无需 <code>.env</code>；未填写则静默跳过对应渠道。
+    </p>
+    <div v-if="webhookConfigLoading" class="webhook-config-loading">加载配置中…</div>
+    <div v-else class="webhook-config-grid">
+        <div class="webhook-card webhook-card--wecom">
+            <div class="webhook-card-head">
+                <span class="webhook-card-icon" aria-hidden="true">&#128188;</span>
+                <div>
+                    <h3 class="webhook-card-title">企业微信机器人 (WeCom)</h3>
+                    <p class="webhook-card-sub">群机器人 Webhook，JSON 文本消息</p>
+                </div>
+            </div>
+            <label class="webhook-field-label" for="webhook-wecom-url">Webhook URL</label>
+            <div class="webhook-field-row">
+                <input
+                    id="webhook-wecom-url"
+                    v-model="webhookWecomUrl"
+                    class="webhook-field-input"
+                    type="url"
+                    name="webhook_wecom_url"
+                    placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."
+                    autocomplete="off"
+                />
+                <button
+                    type="button"
+                    class="btn btn-outline btn-sm webhook-test-btn"
+                    :disabled="!String(webhookWecomUrl || '').trim() || webhookTestWecomLoading"
+                    @click="testWebhookPush('wecom')"
+                >
+                    {{ webhookTestWecomLoading ? '发送中…' : '[⚡ 测试发送]' }}
+                </button>
+            </div>
+        </div>
+        <div class="webhook-card webhook-card--feishu">
+            <div class="webhook-card-head">
+                <span class="webhook-card-icon" aria-hidden="true">&#128172;</span>
+                <div>
+                    <h3 class="webhook-card-title">飞书机器人 (Feishu)</h3>
+                    <p class="webhook-card-sub">自定义机器人 Webhook</p>
+                </div>
+            </div>
+            <label class="webhook-field-label" for="webhook-feishu-url">Webhook URL</label>
+            <div class="webhook-field-row">
+                <input
+                    id="webhook-feishu-url"
+                    v-model="webhookFeishuUrl"
+                    class="webhook-field-input"
+                    type="url"
+                    name="webhook_feishu_url"
+                    placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
+                    autocomplete="off"
+                />
+                <button
+                    type="button"
+                    class="btn btn-outline btn-sm webhook-test-btn"
+                    :disabled="!String(webhookFeishuUrl || '').trim() || webhookTestFeishuLoading"
+                    @click="testWebhookPush('feishu')"
+                >
+                    {{ webhookTestFeishuLoading ? '发送中…' : '[⚡ 测试发送]' }}
+                </button>
+            </div>
+        </div>
+    </div>
+    <div class="webhook-config-footer">
+        <button type="button" class="btn btn-primary" :disabled="webhookSaveLoading" @click="saveWebhookConfigs">
+            {{ webhookSaveLoading ? '保存中…' : '保存配置' }}
+        </button>
     </div>
 </div>
 
@@ -6063,6 +6374,79 @@ async function handleExportWord() {
     color: #991b1b;
 }
 
+.dashboard-reminder-actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.reminder-form {
+    margin-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius);
+    background: var(--surface-alt);
+}
+
+.reminder-form-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.reminder-input {
+    width: 100%;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border-light);
+    background: #fff;
+    font-size: 0.85rem;
+}
+
+.reminder-textarea {
+    resize: vertical;
+}
+
+.reminder-list {
+    margin-top: 14px;
+}
+
+.reminder-group {
+    margin-top: 10px;
+}
+
+.reminder-group-title {
+    font-weight: 700;
+    font-size: 0.82rem;
+    color: #1f2937;
+    margin-bottom: 6px;
+}
+
+.reminder-items {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.reminder-items li {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid #e5e7eb;
+    background: #fff;
+}
+
+.reminder-items li span {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+}
+
 .card-like {
     display: flex;
     gap: 14px;
@@ -6256,6 +6640,133 @@ async function handleExportWord() {
     font-size: 0.85rem;
     margin-bottom: 16px;
     line-height: 1.55;
+}
+
+.webhook-config-tab {
+    padding: 8px 12px 32px;
+    max-width: 960px;
+}
+
+.webhook-config-lead {
+    font-size: 0.86rem;
+    color: #475569;
+    line-height: 1.55;
+    margin: 0 0 18px;
+}
+
+.webhook-config-lead code {
+    font-size: 0.78rem;
+    background: #f1f5f9;
+    padding: 1px 6px;
+    border-radius: 4px;
+}
+
+.webhook-config-loading {
+    padding: 24px;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+}
+
+.webhook-config-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 18px;
+    margin-bottom: 22px;
+}
+
+.webhook-card {
+    border-radius: var(--radius-lg);
+    padding: 20px 18px 18px;
+    border: 1px solid var(--border-light);
+    box-shadow: var(--shadow-sm);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    transition: var(--transition);
+}
+
+.webhook-card--wecom {
+    background: linear-gradient(160deg, #eff6ff 0%, #ffffff 55%);
+    border-color: #bfdbfe;
+}
+
+.webhook-card--feishu {
+    background: linear-gradient(160deg, #f0fdf4 0%, #ffffff 55%);
+    border-color: #bbf7d0;
+}
+
+.webhook-card:hover {
+    border-color: #94a3b8;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+}
+
+.webhook-card-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+}
+
+.webhook-card-icon {
+    font-size: 1.75rem;
+    line-height: 1;
+}
+
+.webhook-card-title {
+    margin: 0 0 4px;
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: #0f172a;
+}
+
+.webhook-card-sub {
+    margin: 0;
+    font-size: 0.78rem;
+    color: #64748b;
+}
+
+.webhook-field-label {
+    font-size: 0.76rem;
+    font-weight: 600;
+    color: #334155;
+}
+
+.webhook-field-row {
+    display: flex;
+    align-items: stretch;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.webhook-field-row .webhook-field-input {
+    flex: 1;
+    min-width: 0;
+}
+
+.webhook-field-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    font-size: 0.82rem;
+    font-family: ui-monospace, system-ui, sans-serif;
+}
+
+.webhook-field-row > .webhook-field-input {
+    width: auto;
+}
+
+.webhook-test-btn {
+    flex-shrink: 0;
+    align-self: stretch;
+    white-space: nowrap;
+}
+
+.webhook-config-footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
 }
 
 .api-whisper-asr-card {

@@ -144,6 +144,9 @@ async function confirmDemoPresentationReset() {
       <button type="button" class="nav-item" :class="{ active: isDashTab('apiConfig') }" @click="goDashboardTab('apiConfig')">
         <span class="nav-item-icon-text">&#9881;</span> <span>API &amp; 模型配置</span>
       </button>
+      <button type="button" class="nav-item" :class="{ active: isDashTab('webhookConfig') }" @click="goDashboardTab('webhookConfig')">
+        <span class="nav-item-icon-text" aria-hidden="true">&#128276;</span> <span>外联推送配置</span>
+      </button>
     </nav>
     <div class="sidebar-footer">
       <div class="user-avatar" id="sidebarAvatar">{{ (userStore.user?.name || 'U').charAt(0).toUpperCase() }}</div>
