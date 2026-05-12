@@ -449,6 +449,20 @@ function ensureTodosRepeatCustomDaysColumn() {
 }
 ensureTodosRepeatCustomDaysColumn();
 
+/** 循环待办：用户当日在界面点击「完成」后记录日历日（Asia/Shanghai），用于铃铛统计「今日清爽」 */
+function ensureTodosLastCompletedDateColumn() {
+  try {
+    const cols = db.prepare('PRAGMA table_info(todos)').all();
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has('last_completed_date')) {
+      db.exec('ALTER TABLE todos ADD COLUMN last_completed_date TEXT');
+    }
+  } catch (e) {
+    logger.error('[db migrate] todos last_completed_date', e);
+  }
+}
+ensureTodosLastCompletedDateColumn();
+
 /** AI 回复点赞 / 评分（用于工作台趋势图） */
 function ensureAiRatingsTable() {
   try {
@@ -2835,7 +2849,8 @@ app.get('/api/todos', (req, res) => {
                 COALESCE(repeat_mode, 'once') AS repeatMode,
                 COALESCE(repeat_custom_days, '[]') AS repeatCustomDays,
                 COALESCE(TRIM(pushed_wecom_at), '') AS pushedWecomAt,
-                COALESCE(TRIM(pushed_feishu_at), '') AS pushedFeishuAt
+                COALESCE(TRIM(pushed_feishu_at), '') AS pushedFeishuAt,
+                TRIM(COALESCE(last_completed_date, '')) AS lastCompletedDate
          FROM todos WHERE user_email = ? ORDER BY remind_at ASC LIMIT 500`,
       )
       .all(email);
@@ -2843,6 +2858,37 @@ app.get('/api/todos', (req, res) => {
   } catch (error) {
     logger.error('[todos GET]', error);
     res.status(500).json({ success: false, message: '读取待办失败' });
+  }
+});
+
+app.get('/api/todos/attention-count', (req, res) => {
+  try {
+    const email = String(req.query.email || '').trim();
+    if (!email) {
+      return res.status(400).json({ success: false, message: '需要 email' });
+    }
+    const today = getTodayYmdShanghai();
+    if (!today) {
+      return res.json({ success: true, count: 0, today: '' });
+    }
+    const row = db
+      .prepare(
+        `SELECT COUNT(1) AS c FROM todos
+         WHERE user_email = ?
+           AND done = 0
+           AND (
+                COALESCE(repeat_mode, 'once') = 'once'
+             OR (
+                  COALESCE(repeat_mode, 'once') != 'once'
+                  AND (last_completed_date IS NULL OR trim(last_completed_date) = '' OR last_completed_date != ?)
+                )
+           )`,
+      )
+      .get(email, today);
+    res.json({ success: true, count: Number(row?.c || 0), today });
+  } catch (error) {
+    logger.error('[todos/attention-count]', error);
+    res.status(500).json({ success: false, message: '读取失败' });
   }
 });
 
@@ -2999,11 +3045,29 @@ app.patch('/api/todos/:id/done', (req, res) => {
     if (!Number.isFinite(id)) {
       return res.status(400).json({ success: false, message: '无效 ID' });
     }
-    const info = db.prepare('UPDATE todos SET done = 1 WHERE id = ? AND user_email = ?').run(id, email);
+    const row = db.prepare('SELECT repeat_mode FROM todos WHERE id = ? AND user_email = ?').get(id, email);
+    if (!row) {
+      return res.status(404).json({ success: false, message: '未找到待办或无权操作' });
+    }
+    const rm = String(row.repeat_mode || 'once').toLowerCase().trim();
+    if (rm === 'once') {
+      const info = db.prepare('UPDATE todos SET done = 1 WHERE id = ? AND user_email = ?').run(id, email);
+      if (info.changes === 0) {
+        return res.status(404).json({ success: false, message: '未找到待办或无权操作' });
+      }
+      return res.json({ success: true, mode: 'once' });
+    }
+    const today = getTodayYmdShanghai();
+    if (!today) {
+      return res.status(500).json({ success: false, message: '日期计算失败' });
+    }
+    const info = db
+      .prepare('UPDATE todos SET last_completed_date = ? WHERE id = ? AND user_email = ? AND done = 0')
+      .run(today, id, email);
     if (info.changes === 0) {
       return res.status(404).json({ success: false, message: '未找到待办或无权操作' });
     }
-    res.json({ success: true });
+    return res.json({ success: true, mode: 'repeat', lastCompletedDate: today });
   } catch (error) {
     logger.error('[todos/done]', error);
     res.status(500).json({ success: false, message: '更新失败' });
@@ -3099,11 +3163,11 @@ app.delete('/api/todos/:id', (req, res) => {
 
 function buildWecomTodoText(row) {
   const title = String(row.title || '').trim() || '待办提醒';
-  const time = String(row.remindAt || '').trim();
+  const time = formatRemindAtZhBeijingYMDHM(row.remindAt || '');
   const notes = String(row.notes || '').trim();
   const who = String(row.userEmail || '').trim();
   const parts = [`⏰ 待办提醒`, `事项：${title}`];
-  if (time) {
+  if (time && time !== '—') {
     parts.push(`时间：${time}`);
   }
   if (notes) {
@@ -3113,6 +3177,37 @@ function buildWecomTodoText(row) {
     parts.push(`用户：${who}`);
   }
   return parts.join('\n');
+}
+
+/**
+ * 企微推送：将 remind_at 规范为北京时间（Asia/Shanghai）「YYYY年MM月DD日 HH:mm」，禁止裸 ISO UTC 串。
+ * @param {string|undefined|null} remindAtStr
+ * @returns {string}
+ */
+function formatRemindAtZhBeijingYMDHM(remindAtStr) {
+  const ms = parseRemindAtToUtcMs(remindAtStr);
+  if (!Number.isFinite(ms)) {
+    return '—';
+  }
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(ms));
+  const pick = (t) => parts.find((p) => p.type === t)?.value || '';
+  const y = pick('year');
+  const mo = pick('month');
+  const da = pick('day');
+  const h = pick('hour');
+  const mi = pick('minute');
+  if (!y || !mo || !da) {
+    return '—';
+  }
+  return `${y}年${mo}月${da}日 ${h}:${mi}`;
 }
 
 /** 企微 Markdown 字段：单行展示，避免换行破坏机器人解析 */
@@ -3130,7 +3225,7 @@ function sanitizeWecomMarkdownField(s, maxLen = 800) {
  */
 function buildWecomTodoMarkdownPayload(row) {
   const task = sanitizeWecomMarkdownField(row.title || '') || '待办提醒';
-  const remindTime = sanitizeWecomMarkdownField(row.remindAt || '') || '—';
+  const remindTime = sanitizeWecomMarkdownField(formatRemindAtZhBeijingYMDHM(row.remindAt || '')) || '—';
   const content = `**<font color="warning">待办提醒触发</font>**\n> **任务**：${task}\n> **预定时间**：${remindTime}\n\n*来自会意助手*`;
   return {
     msgtype: 'markdown',
@@ -3430,6 +3525,27 @@ app.post('/api/configs/webhooks/test', async (req, res) => {
 });
 
 /** 将待办 remind_at 解析为 UTC 毫秒，与 Date.now() 同源比较，避免字符串与 ISO 混排导致误触发/漏触发 */
+/** 东八区日历日 YYYY-MM-DD（与企微时间口径一致，用于循环待办「今日清爽」） */
+function getTodayYmdShanghai() {
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date());
+    const y = parts.find((p) => p.type === 'year')?.value;
+    const m = parts.find((p) => p.type === 'month')?.value;
+    const d = parts.find((p) => p.type === 'day')?.value;
+    if (!y || !m || !d) {
+      return '';
+    }
+    return `${y}-${m}-${d}`;
+  } catch {
+    return '';
+  }
+}
+
 function parseRemindAtToUtcMs(remindAtStr) {
   const raw = String(remindAtStr ?? '').trim();
   if (!raw) {

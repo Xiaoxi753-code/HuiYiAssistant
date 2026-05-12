@@ -1,7 +1,9 @@
-# 会意助手 (Knowing Assistant)
+# 会意助手 (HuiYi Assistant / Knowing Assistant)
 
 > **你的全能数字研友与智能办公引擎**  
 > 将文献、模板、对话、技能广场、成长看板与待办调度统一在一套工作台中——从「整理」到「想清」再到「推到企微」，形成闭环。
+
+**源码仓库**：<https://github.com/Xiaoxi753-code/HuiYiAssistant>（默认分支 **`main`**）
 
 ---
 
@@ -12,6 +14,7 @@
 - [快速开始](#-快速开始-quick-start)
 - [环境配置](#-环境配置)
 - [手动启动（可选）](#-手动启动可选)
+- [容器部署（可选）](#-容器部署可选)
 - [许可说明](#-许可说明)
 
 ---
@@ -23,7 +26,7 @@
 | 1 | 🧠 **带「思考过程」的对话** | 对模型输出中的 **`<think>`** 做拦截与折叠展示，便于阅读正式回答（见前端对话渲染逻辑）。 |
 | 2 | ⏰ **待办与推送调度** | **重复规则**（含自定义星期）、**稍后提醒**、修改提醒时间；**企业微信 / 飞书** Webhook 在应用内配置后，由后端轮询推送（见 `server.js` 与「外联推送配置」）。 |
 | 3 | 📁 **模板与资料库** | **Word 模板**填充与预览、**PDF/Word** 等解析、个人资料库；上传侧对文件名做了规范化处理。 |
-| 4 | 🎨 **工作台体验** | **可调整宽度的侧栏**、**对话区会话列表宽度与收起**、概览与图表（**ECharts**）等。 |
+| 4 | 🎨 **工作台体验** | **可调整宽度的侧栏**、**对话 / 情感陪伴沉浸布局**、**顶栏待办 🔔 + 个人中心**；**API 与模型**页支持将「新增配置」通过 **Teleport** 对齐至顶栏；概览与图表（**ECharts**）。 |
 | 5 | 🏆 **技能与成长** | 独立路由：**技能广场**（`SkillLibraryView`）、**情绪与成长看板**（`GrowthDashboardView`），与主工作台协同。 |
 
 > **说明**：侧栏中部分模块（例如历史上的「PPT 大纲」等）若已用 `v-if="false"` 等方式关闭入口，则默认用户界面不再展示；后端仍可能保留对应依赖或接口，以仓库内代码为准。
@@ -42,6 +45,13 @@
 ---
 
 ## 快速开始 (Quick Start)
+
+### 克隆仓库
+
+```bash
+git clone https://github.com/Xiaoxi753-code/HuiYiAssistant.git
+cd HuiYiAssistant
+```
 
 ### Windows（推荐）
 
@@ -115,4 +125,4 @@ cd frontend && (test -f package-lock.json && npm ci || npm install) && npm run d
 
 ---
 
-**会意助手 (Knowing Assistant)** — *Think clearly. Ship calmly.*
+**会意助手 (HuiYi Assistant)** — *Think clearly. Ship calmly.*

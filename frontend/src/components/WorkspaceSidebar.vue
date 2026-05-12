@@ -3,7 +3,6 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElIcon } from 'element-plus'
 import 'element-plus/es/components/icon/style/css'
 import {
-  Bell,
   ChatDotRound,
   DArrowLeft,
   DArrowRight,
@@ -89,18 +88,6 @@ function handleLogout() {
 <template>
   <aside class="sidebar" :class="{ 'sidebar--warm': isCompanionWarmNav(), 'sidebar--collapsed': collapsed }">
     <div class="sidebar-header">
-      <button
-        type="button"
-        class="sidebar-collapse-btn"
-        :title="collapsed ? '展开侧栏' : '收起侧栏'"
-        :aria-expanded="!collapsed"
-        @click="emit('toggle-collapse')"
-      >
-        <el-icon :size="18">
-          <DArrowLeft v-if="!collapsed" />
-          <DArrowRight v-else />
-        </el-icon>
-      </button>
       <div class="logo-icon-sm">会</div>
       <span class="logo-text">会意助手</span>
     </div>
@@ -147,7 +134,7 @@ function handleLogout() {
       <button type="button" class="nav-item" :class="{ active: isDashTab('paper') }" @click="goDashboardTab('paper')">
         <span class="nav-item-inner">
           <el-icon class="nav-item-icon" :size="18"><Document /></el-icon>
-          <span>文献论文摘要</span>
+          <span>智能长文速读</span>
         </span>
       </button>
       <button v-if="false" type="button" class="nav-item" :class="{ active: isDashTab('ppt') }" @click="goDashboardTab('ppt')">
@@ -177,7 +164,7 @@ function handleLogout() {
       </button>
       <button type="button" class="nav-item" :class="{ active: isDashTab('reminders') }" @click="goDashboardTab('reminders')">
         <span class="nav-item-inner">
-          <el-icon class="nav-item-icon" :size="18"><Bell /></el-icon>
+          <span class="nav-item-icon nav-item-icon--emoji" aria-hidden="true">🔔</span>
           <span>主动提醒推送</span>
         </span>
       </button>
@@ -201,9 +188,23 @@ function handleLogout() {
         <div class="user-name" id="sidebarUserName">{{ userStore.user?.name || '用户' }}</div>
         <div class="user-role">个人版</div>
       </div>
-      <button type="button" class="btn-ghost sidebar-logout-btn" title="退出登录" @click="handleLogout">
-        <el-icon :size="20"><SwitchButton /></el-icon>
-      </button>
+      <div class="sidebar-footer-actions">
+        <button
+          type="button"
+          class="sidebar-collapse-btn sidebar-collapse-btn--footer"
+          :title="collapsed ? '展开侧栏' : '收起侧栏'"
+          :aria-expanded="!collapsed"
+          @click="emit('toggle-collapse')"
+        >
+          <el-icon :size="18">
+            <DArrowLeft v-if="!collapsed" />
+            <DArrowRight v-else />
+          </el-icon>
+        </button>
+        <button type="button" class="btn-ghost sidebar-logout-btn" title="退出登录" @click="handleLogout">
+          <el-icon :size="20"><SwitchButton /></el-icon>
+        </button>
+      </div>
     </div>
   </aside>
 </template>
@@ -222,11 +223,28 @@ function handleLogout() {
   opacity: 0.92;
 }
 
+.nav-item-icon--emoji {
+  font-size: 18px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25em;
+}
+
 .sidebar-logout-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 6px 8px;
+}
+
+.sidebar-footer-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
 .sidebar-collapse-btn {
@@ -242,12 +260,29 @@ function handleLogout() {
   background: var(--surface-alt, #f8fafc);
   color: var(--text-secondary, #475569);
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition:
+    background 0.2s ease,
+    border-color 0.2s ease,
+    color 0.2s ease,
+    transform 0.18s ease,
+    box-shadow 0.2s ease;
 }
 
 .sidebar-collapse-btn:hover {
   background: var(--primary-light, #eef2ff);
   border-color: #c7d2fe;
   color: var(--primary, #4f46e5);
+  transform: translateX(-1px);
+  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.12);
+}
+
+.sidebar-collapse-btn--footer:hover {
+  transform: scale(1.05);
+}
+
+.sidebar.sidebar--collapsed .sidebar-footer-actions {
+  margin-left: 0;
+  flex-direction: column;
+  gap: 8px;
 }
 </style>

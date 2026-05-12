@@ -81,7 +81,7 @@ export function getOpenClawChatTools() {
             target: {
               type: 'string',
               enum: ['default', 'companion', 'paper', 'templates', 'apiConfig', 'chat'],
-              description: '目标：default=主工作台对话；companion=情感陪伴；paper=文献摘要；templates=模板引擎；apiConfig=模型配置；chat=对话助手',
+              description: '目标：default=主工作台对话；companion=情感陪伴；paper=智能长文速读；templates=模板引擎；apiConfig=模型配置；chat=对话助手',
             },
           },
           required: ['target'],
@@ -173,7 +173,7 @@ export function createToolExecutor(deps) {
             text: modelText,
             source: 'parsed_session',
             navigate_tab: 'paper',
-            ui_hint: '文献模块',
+            ui_hint: '智能长文速读',
           });
         }
 
@@ -183,7 +183,7 @@ export function createToolExecutor(deps) {
           return JSON.stringify({
             ok: false,
             error:
-              '当前请求未附带已解析正文或文件数据。请用户在「文献论文摘要」页先解析文档，或使用「指挥会意助手」注入上下文后再试。',
+              '当前请求未附带已解析正文或文件数据。请用户在「智能长文速读」页先解析文档，或使用「指挥会意助手」注入上下文后再试。',
           });
         }
         let buf;
@@ -212,7 +212,7 @@ export function createToolExecutor(deps) {
           truncated,
           text: modelText,
           navigate_tab: 'paper',
-          ui_hint: '文献模块',
+          ui_hint: '智能长文速读',
         });
       }
 

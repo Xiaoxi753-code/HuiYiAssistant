@@ -672,6 +672,16 @@
             min-height: 100vh;
             transition: var(--transition-slow);
         }
+
+        .main-content.workspace-dashboard-body.dashboard--immersive .chat-container {
+            height: auto !important;
+            min-height: 0 !important;
+            flex: 1;
+        }
+
+        .main-content.workspace-dashboard-body.dashboard--immersive .chat-header {
+            padding: max(8px, env(safe-area-inset-top, 0px)) 14px 10px 14px;
+        }
         .topbar {
             display: flex;
             align-items: center;

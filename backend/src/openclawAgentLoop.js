@@ -14,7 +14,7 @@ const MAX_TOOL_ROUNDS = 4;
 
 const TOOL_STATUS_LABELS = {
   request_clarification: '正在收集关键约束…',
-  parse_document: '正在指挥 [文献模块] 提取正文…',
+  parse_document: '正在指挥 [智能长文速读] 提取正文…',
   generate_word_report: '正在调用 [Word 引擎] 生成文档…',
   switch_theme: '正在切换界面 / 主题…',
   update_model_config: '正在更新 [API 模型配置]…',

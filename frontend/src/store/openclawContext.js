@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 
 /**
- * 会意助手工作台全局上下文：与「文献摘要」自适应卡片等模块共享，供对话助手读取。
+ * 会意助手工作台全局上下文：与「智能长文速读」自适应卡片等模块共享，供对话助手读取。
  */
 export const useOpenclawContextStore = defineStore('openclawContext', {
   state: () => ({

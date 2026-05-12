@@ -12,8 +12,8 @@ echo    ██╔═██╗  ██║╚██╗██║ ██║   ██
 echo    ██║  ██╗ ██║ ╚████║ ╚██████╔╝╚███╔███╔╝██║██║ ╚████║╚██████╔╝
 echo    ╚═╝  ╚═╝ ╚═╝  ╚═══╝  ╚═════╝  ╚══╝╚══╝ ╚═╝╚═╝  ╚═══╝ ╚═════╝
 echo.
-echo              Knowing Assistant  ·  会意助手
-echo              Your cognitive copilot for research ^& work
+echo              HuiYi Assistant  ·  会意助手
+echo              https://github.com/Xiaoxi753-code/HuiYiAssistant
 echo.
 echo  ------------------------------------------------------------------
 echo.
@@ -70,7 +70,7 @@ if not exist "%ROOT%frontend\package.json" (
 echo  [√] 步骤 3/4：backend / frontend 目录正常
 
 rem ========== 步骤 4：生成子脚本（避免括号块写入损坏第二份脚本）==========
-set "WRK=%TEMP%\knowing-assistant-run"
+set "WRK=%TEMP%\huiyi-assistant-run"
 if not exist "%WRK%" mkdir "%WRK%" 2>nul
 
 set "BE=%WRK%\_backend.bat"
@@ -80,7 +80,7 @@ rem --- 后端启动脚本（逐行写入，禁止用 ^> file ^( ... ^) 多行�
 >"%BE%" echo @echo off
 >>"%BE%" echo setlocal
 >>"%BE%" echo chcp 65001 ^>nul
->>"%BE%" echo title Knowing Assistant - Backend
+>>"%BE%" echo title 会意助手 - Backend
 >>"%BE%" echo cd /d "%ROOT%backend"
 >>"%BE%" echo if not exist node_modules ^(
 >>"%BE%" echo   echo [backend] 首次安装依赖，请稍候…
@@ -103,7 +103,7 @@ rem --- 前端启动脚本（npm ci 失败则自动改 npm install，全程用 e
 >"%FE%" echo @echo off
 >>"%FE%" echo setlocal
 >>"%FE%" echo chcp 65001 ^>nul
->>"%FE%" echo title Knowing Assistant - Frontend
+>>"%FE%" echo title 会意助手 - Frontend
 >>"%FE%" echo cd /d "%ROOT%frontend"
 >>"%FE%" echo if exist package-lock.json ^(
 >>"%FE%" echo   echo [frontend] 检测到 package-lock.json，执行 npm ci …
@@ -151,9 +151,9 @@ echo  [*] 若只看到 1 个窗口，请阅读该窗口内提示；另一个可�
 echo.
 
 rem 并发启动：两次 start 互不等待；中间间隔 1 秒，避免个别环境吞掉第二次 start
-start "Knowing Assistant - Backend" cmd /k call "%BE%"
+start "会意助手 - Backend" cmd /k call "%BE%"
 ping -n 2 127.0.0.1 >nul
-start "Knowing Assistant - Frontend" cmd /k call "%FE%"
+start "会意助手 - Frontend" cmd /k call "%FE%"
 
 if errorlevel 1 (
     echo  [×] 启动前端窗口失败（start 命令异常）。
@@ -163,7 +163,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo  [√] 已请求打开后端与前端控制台（标题分别为 Knowing Assistant - Backend / Frontend）
+echo  [√] 已请求打开后端与前端控制台（窗口标题：会意助手 - Backend / Frontend）
 
 set "VITE_PORT=5173"
 echo.
@@ -176,7 +176,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$port=%VITE_PORT%; $max=
 if errorlevel 1 (
     echo.
     echo  【提示】在约定时间内仍未检测到端口 !VITE_PORT! 监听。
-    echo        请查看 「Knowing Assistant - Frontend」窗口：若仍在安装依赖，请继续等待直至出现：
+    echo        请查看 「会意助手 - Frontend」窗口：若仍在安装依赖，请继续等待直至出现：
     echo          VITE v…  ready in … ms
     echo          Local:   http://localhost:!VITE_PORT!/
     echo        然后再手动在浏览器打开上述地址。

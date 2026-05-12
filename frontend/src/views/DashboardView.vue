@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, nextTick, watch, onBeforeUnmount, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { ElMessage, ElCard, ElButton, ElMessageBox, ElDialog, ElDrawer, ElEmpty, ElButtonGroup, ElInput } from 'element-plus'
+import { ElMessage, ElCard, ElButton, ElMessageBox, ElDialog, ElDrawer, ElEmpty, ElButtonGroup, ElInput, ElDatePicker, ElDropdown, ElDropdownMenu, ElDropdownItem, ElCheckbox } from 'element-plus'
 import 'element-plus/es/components/message/style/css'
 import 'element-plus/es/components/card/style/css'
 import 'element-plus/es/components/button/style/css'
@@ -10,6 +10,9 @@ import 'element-plus/es/components/dialog/style/css'
 import 'element-plus/es/components/drawer/style/css'
 import 'element-plus/es/components/empty/style/css'
 import 'element-plus/es/components/input/style/css'
+import 'element-plus/es/components/date-picker/style/css'
+import 'element-plus/es/components/dropdown/style/css'
+import 'element-plus/es/components/checkbox/style/css'
 import { useUserStore } from '../store/user.js'
 import { useOpenclawContextStore } from '../store/openclawContext.js'
 import { renderAsync } from 'docx-preview'
@@ -20,6 +23,7 @@ import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import * as echarts from 'echarts'
 import MeetingMinutesView from '../components/MeetingMinutesView.vue'
+import { formatLocalDateTime, formatLocalDateTimeWithRelative } from '../utils/dateDisplay.js'
 import { ElIcon } from 'element-plus'
 import 'element-plus/es/components/icon/style/css'
 import {
@@ -50,7 +54,9 @@ import {
     Setting,
     TrendCharts,
     UserFilled,
+    Plus,
 } from '@element-plus/icons-vue'
+import TodoBell from '../components/TodoBell.vue'
 
 marked.setOptions({
     gfm: true,
@@ -124,7 +130,6 @@ const route = useRoute()
 const userStore = useUserStore()
 const openclawCtx = useOpenclawContextStore()
 const currentTab = ref('overview')
-const quickActionOpen = ref(false)
 const wordContainer = ref(null)
 const isPreviewLoading = ref(false)
 const previewError = ref('')
@@ -154,7 +159,7 @@ const tabTitles = {
   library: '个人资料库',
   chat: '对话助手',
   meeting: '智能会议纪要',
-  paper: '文献论文摘要',
+  paper: '智能长文速读',
   ppt: 'PPT大纲生成',
   companion: '情感陪伴式对话',
   identity: '多身份切换',
@@ -478,15 +483,6 @@ function chatSessionPersonaIcon(session) {
     return Briefcase
 }
 
-async function syncDashboardData() {
-    await loadDashboardStats()
-    await loadRatingsTrend()
-    await loadMyTemplates()
-    await loadTemplateFillRecords()
-    await fetchWebhookConfigs()
-    ElMessage.success('已刷新统计、模板列表、生成历史与外联推送配置')
-}
-
 async function loadDashboardStats() {
     const email = userStore.user?.email
     if (!email) {
@@ -742,7 +738,6 @@ const reminderForm = ref({
     repeatMode: 'once',
     repeatCustomDays: /** @type {number[]} */ ([]),
 })
-const todoSnoozingId = ref(null)
 const reminderSaving = ref(false)
 
 const WEEKDAY_CHECKBOXES = [
@@ -761,7 +756,8 @@ const remindersBoardTab = ref('pending')
 
 const reminderTimeEditOpen = ref(false)
 const reminderTimeEditRow = ref(null)
-const reminderTimeEditDraft = ref('')
+/** @type {import('vue').Ref<Date | null>} */
+const reminderTimeEditDate = ref(null)
 const reminderTimeEditSaving = ref(false)
 
 function todoDrawerBucket(t) {
@@ -823,137 +819,26 @@ const remindersPushedBoard = computed(() => {
     return sortRemindersForBoard(list, 'pushed')
 })
 
-/** 沉浸页悬浮待办铃铛：拖拽、边界、localStorage 记忆 */
-const OPENCLAW_BELL_POSITION_KEY = 'openclaw_bell_position'
-const BELL_HIT_SIZE = 44
-const BELL_DRAG_THRESHOLD_PX = 6
-
-function clampBellScreenPos(x, y) {
-    if (typeof window === 'undefined') {
-        return { x: 16, y: 16 }
-    }
-    const pad = 4
-    const maxX = window.innerWidth - BELL_HIT_SIZE - pad
-    const maxY = window.innerHeight - BELL_HIT_SIZE - pad
-    return {
-        x: Math.min(Math.max(pad, x), maxX),
-        y: Math.min(Math.max(pad, y), maxY),
-    }
-}
-
-function defaultBellScreenPos() {
-    if (typeof window === 'undefined') {
-        return { x: 16, y: 16 }
-    }
-    return clampBellScreenPos(window.innerWidth - BELL_HIT_SIZE - 24, 16)
-}
-
-function loadBellScreenPosFromStorage() {
-    if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
-        return { x: 16, y: 16 }
-    }
-    try {
-        const raw = localStorage.getItem(OPENCLAW_BELL_POSITION_KEY)
-        if (!raw) {
-            return defaultBellScreenPos()
+const remindersRecurringBoard = computed(() => {
+    const list = remindersBoardTodos.value.filter((t) => {
+        if (Number(t.done) === 1) {
+            return false
         }
-        const o = JSON.parse(raw)
-        const x = Number(o.x)
-        const y = Number(o.y)
-        if (!Number.isFinite(x) || !Number.isFinite(y)) {
-            return defaultBellScreenPos()
-        }
-        return clampBellScreenPos(x, y)
-    } catch {
-        return defaultBellScreenPos()
+        const rm = String(t.repeatMode || 'once').toLowerCase()
+        return rm !== 'once'
+    })
+    return sortRemindersForBoard(list, 'pending')
+})
+
+const remindersBoardListActive = computed(() => {
+    if (remindersBoardTab.value === 'pending') {
+        return remindersPendingBoard.value
     }
-}
-
-function persistBellScreenPos() {
-    if (typeof localStorage === 'undefined') {
-        return
+    if (remindersBoardTab.value === 'pushed') {
+        return remindersPushedBoard.value
     }
-    try {
-        localStorage.setItem(
-            OPENCLAW_BELL_POSITION_KEY,
-            JSON.stringify({ x: bellScreenPos.value.x, y: bellScreenPos.value.y }),
-        )
-    } catch {
-        /* ignore */
-    }
-}
-
-const bellScreenPos = ref(loadBellScreenPosFromStorage())
-const bellDragging = ref(false)
-
-const bellPointerMoveOpts = { passive: false, capture: false }
-
-let bellDragSession = {
-    startClientX: 0,
-    startClientY: 0,
-    originX: 0,
-    originY: 0,
-    movedPastThreshold: false,
-    listenersActive: false,
-}
-
-function teardownBellDragListeners() {
-    if (!bellDragSession.listenersActive) {
-        return
-    }
-    document.removeEventListener('pointermove', onBellPointerMove, bellPointerMoveOpts)
-    document.removeEventListener('pointerup', onBellPointerUp, true)
-    document.removeEventListener('pointercancel', onBellPointerUp, true)
-    bellDragSession.listenersActive = false
-}
-
-function onBellPointerMove(ev) {
-    const dx = ev.clientX - bellDragSession.startClientX
-    const dy = ev.clientY - bellDragSession.startClientY
-    if (Math.hypot(dx, dy) > BELL_DRAG_THRESHOLD_PX) {
-        bellDragSession.movedPastThreshold = true
-        bellDragging.value = true
-    }
-    if (!bellDragSession.movedPastThreshold) {
-        return
-    }
-    bellScreenPos.value = clampBellScreenPos(bellDragSession.originX + dx, bellDragSession.originY + dy)
-    ev.preventDefault()
-}
-
-function onBellPointerUp() {
-    teardownBellDragListeners()
-    const wasDrag = bellDragSession.movedPastThreshold
-    bellDragging.value = false
-    bellDragSession.movedPastThreshold = false
-    if (wasDrag) {
-        persistBellScreenPos()
-    } else {
-        openTodoDrawer()
-    }
-}
-
-function onBellPointerDown(ev) {
-    if (typeof ev.button === 'number' && ev.button !== 0) {
-        return
-    }
-    teardownBellDragListeners()
-    bellDragSession.startClientX = ev.clientX
-    bellDragSession.startClientY = ev.clientY
-    bellDragSession.originX = bellScreenPos.value.x
-    bellDragSession.originY = bellScreenPos.value.y
-    bellDragSession.movedPastThreshold = false
-    bellDragging.value = false
-    document.addEventListener('pointermove', onBellPointerMove, bellPointerMoveOpts)
-    document.addEventListener('pointerup', onBellPointerUp, true)
-    document.addEventListener('pointercancel', onBellPointerUp, true)
-    bellDragSession.listenersActive = true
-    ev.preventDefault()
-}
-
-function onBellWindowResize() {
-    bellScreenPos.value = clampBellScreenPos(bellScreenPos.value.x, bellScreenPos.value.y)
-}
+    return remindersRecurringBoard.value
+})
 
 /** 对话会话（左侧历史） */
 const chatSessions = ref([])
@@ -1289,6 +1174,23 @@ watch(
 )
 
 watch(
+    () => route.query.openTodo,
+    (v) => {
+        if (v !== '1' && v !== 'true') {
+            return
+        }
+        if (!userStore.user?.email) {
+            return
+        }
+        openTodoDrawer()
+        const q = { ...route.query }
+        delete q.openTodo
+        router.replace({ name: route.name, query: q, params: route.params })
+    },
+    { immediate: true },
+)
+
+watch(
     () => userStore.user?.email,
     () => {
         void loadDashboardStats()
@@ -1483,6 +1385,37 @@ const paperSummaryCardEntries = computed(() => {
             }
         })
 })
+
+/** 长文速读 Agent 嗅探的潜在待办（容错：无字段或空数组） */
+const paperPotentialTodosList = computed(() => {
+    const s = paperSummary.value
+    if (!s || typeof s !== 'object') {
+        return []
+    }
+    const raw = s.potential_todos
+    if (!Array.isArray(raw)) {
+        return []
+    }
+    return raw
+        .filter((x) => x && typeof x === 'object')
+        .map((x) => ({
+            title: String(x.title || x.content || x.task || '').trim(),
+            remind_time: x.remind_time != null ? String(x.remind_time).trim() : '',
+            notes: x.notes != null ? String(x.notes).trim() : '',
+        }))
+        .filter((x) => x.title.length > 0)
+})
+
+const paperPotentialTodoPick = ref(/** @type {Record<number, boolean>} */({}))
+const paperPotentialSubmitting = ref(false)
+
+watch(paperSummary, () => {
+    paperPotentialTodoPick.value = {}
+})
+
+function setPaperPotentialPick(idx, checked) {
+    paperPotentialTodoPick.value = { ...paperPotentialTodoPick.value, [idx]: !!checked }
+}
 
 /** 供后端合并进单条 system 的附加块（JSON，便于模型解析） */
 function buildPaperSystemContextBlock() {
@@ -1769,9 +1702,35 @@ function todoRepeatTag(mode, repeatCustomDaysRaw) {
     return { label: '单次', kind: 'once' }
 }
 
+function getTodayYmdShanghaiClient() {
+    try {
+        const parts = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Asia/Shanghai',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+        }).formatToParts(new Date())
+        const y = parts.find((p) => p.type === 'year')?.value
+        const m = parts.find((p) => p.type === 'month')?.value
+        const d = parts.find((p) => p.type === 'day')?.value
+        return y && m && d ? `${y}-${m}-${d}` : ''
+    } catch {
+        return ''
+    }
+}
+
 function todoStatusDisplay(t) {
     if (Number(t.done) === 1) {
         return { label: '已完成', kind: 'done' }
+    }
+    const rm = String(t.repeatMode || 'once').toLowerCase()
+    if (rm !== 'once') {
+        const today = getTodayYmdShanghaiClient()
+        const lcd = String(t.lastCompletedDate || '').trim()
+        if (today && lcd && lcd === today) {
+            return { label: '✓ 今日已处理', kind: 'repeat_cleared' }
+        }
+        return { label: '🔁 循环提醒', kind: 'repeat' }
     }
     const st = String(t.status || 'pending').toLowerCase()
     if (st === 'notified') {
@@ -1834,11 +1793,10 @@ async function loadTodoPendingCount() {
         return
     }
     try {
-        const r = await fetch(`/api/todos?email=${encodeURIComponent(email)}`)
+        const r = await fetch(`/api/todos/attention-count?email=${encodeURIComponent(email)}`)
         const d = await r.json().catch(() => ({}))
         if (r.ok && d.success) {
-            const items = d.items || []
-            todoPendingCount.value = items.filter((x) => Number(x.done) === 0).length
+            todoPendingCount.value = Number(d.count || 0)
         }
     } catch {
         todoPendingCount.value = 0
@@ -1885,6 +1843,65 @@ async function loadRemindersBoard() {
     }
 }
 
+async function addSelectedPaperPotentialTodos() {
+    const email = userStore.user?.email
+    if (!email) {
+        ElMessage.warning('请先登录后再加入待办')
+        return
+    }
+    const list = paperPotentialTodosList.value
+    const pickedIdx = list.map((_, i) => i).filter((i) => paperPotentialTodoPick.value[i])
+    if (!pickedIdx.length) {
+        ElMessage.warning('请先勾选要加入的待办')
+        return
+    }
+    paperPotentialSubmitting.value = true
+    const defaultRemind = () => new Date(Date.now() + 2 * 3600000).toISOString()
+    let ok = 0
+    try {
+        for (const i of pickedIdx) {
+            const item = list[i]
+            if (!item) {
+                continue
+            }
+            let remindAt = item.remind_time
+            if (!remindAt || Number.isNaN(Date.parse(remindAt))) {
+                remindAt = defaultRemind()
+            } else {
+                const parsed = Date.parse(remindAt)
+                remindAt = Number.isFinite(parsed) ? new Date(parsed).toISOString() : defaultRemind()
+            }
+            const r = await fetch('/api/todos', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    userEmail: email,
+                    title: item.title.slice(0, 500),
+                    remindAt,
+                    notes: item.notes ? `[长文速读] ${item.notes}`.slice(0, 2000) : '[长文速读] 来自智能长文速读嗅探',
+                    source: 'paper_summary',
+                    repeatMode: 'once',
+                }),
+            })
+            const d = await r.json().catch(() => ({}))
+            if (r.ok && d.success) {
+                ok += 1
+            }
+        }
+        ElMessage.success(`已加入 ${ok} 条待办并进入主动提醒调度`)
+        paperPotentialTodoPick.value = {}
+        void loadTodosUpcoming()
+        void loadTodoPendingCount()
+        void loadRemindersBoard()
+        void loadTodosForDrawer()
+        updateDueTodoAlerts()
+    } catch (e) {
+        ElMessage.error(String(e?.message || e || '加入失败'))
+    } finally {
+        paperPotentialSubmitting.value = false
+    }
+}
+
 async function markTodoDoneRow(row) {
     const email = userStore.user?.email
     if (!email || !row?.id) {
@@ -1900,6 +1917,11 @@ async function markTodoDoneRow(row) {
         if (!r.ok || !d.success) {
             throw new Error(d.message || `HTTP ${r.status}`)
         }
+        if (d.mode === 'repeat') {
+            ElMessage.success('已标记本日完成；循环任务将在明日重新计入提醒数字')
+        } else {
+            ElMessage.success('已完成')
+        }
         void loadTodosForDrawer()
         void loadRemindersBoard()
         void loadTodoPendingCount()
@@ -1907,36 +1929,6 @@ async function markTodoDoneRow(row) {
         updateDueTodoAlerts()
     } catch (e) {
         ElMessage.error(String(e?.message || e || '操作失败'))
-    }
-}
-
-async function snoozeTodoRow(row, minutes = 10) {
-    const email = userStore.user?.email
-    if (!email || !row?.id) {
-        return
-    }
-    todoSnoozingId.value = row.id
-    try {
-        const r = await fetch(`/api/todos/${row.id}/snooze`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, minutes }),
-        })
-        const d = await r.json().catch(() => ({}))
-        if (!r.ok || !d.success) {
-            throw new Error(d.message || `HTTP ${r.status}`)
-        }
-        ElMessage.success(`已推迟 ${minutes} 分钟后再提醒`)
-        void loadTodosForDrawer()
-        void loadRemindersBoard()
-        void loadTodoPendingCount()
-        void loadTodosUpcoming()
-        updateDueTodoAlerts()
-        checkDueTodoNotifications()
-    } catch (e) {
-        ElMessage.error(String(e?.message || e || '稍后提醒失败'))
-    } finally {
-        todoSnoozingId.value = null
     }
 }
 
@@ -1951,6 +1943,7 @@ async function deleteTodoRow(row) {
         if (!r.ok || !d.success) {
             throw new Error(d.message || `HTTP ${r.status}`)
         }
+        ElMessage.success('已删除')
         void loadTodosForDrawer()
         void loadRemindersBoard()
         void loadTodoPendingCount()
@@ -1959,6 +1952,19 @@ async function deleteTodoRow(row) {
     } catch (e) {
         ElMessage.error(String(e?.message || e || '删除失败'))
     }
+}
+
+async function confirmDeleteTodoRow(row) {
+    try {
+        await ElMessageBox.confirm('确定要删除该待办吗？删除后不可恢复。', '删除待办', {
+            confirmButtonText: '删除',
+            cancelButtonText: '取消',
+            type: 'warning',
+        })
+    } catch {
+        return
+    }
+    await deleteTodoRow(row)
 }
 
 function openTodoDrawer() {
@@ -2008,21 +2014,13 @@ function toggleReminderCustomDay(day) {
     reminderForm.value.repeatCustomDays = arr
 }
 
-function formatDatetimeLocalForInput(iso) {
-    const d = new Date(iso)
-    if (!Number.isFinite(d.getTime())) {
-        return ''
-    }
-    const pad = (n) => String(n).padStart(2, '0')
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
-
 function openReminderTimeEdit(row) {
     if (!row?.id || !row.remindAt) {
         return
     }
     reminderTimeEditRow.value = row
-    reminderTimeEditDraft.value = formatDatetimeLocalForInput(row.remindAt)
+    const d = new Date(row.remindAt)
+    reminderTimeEditDate.value = Number.isFinite(d.getTime()) ? d : new Date()
     reminderTimeEditOpen.value = true
 }
 
@@ -2032,17 +2030,12 @@ async function saveReminderTimeEdit() {
     if (!email || !row?.id) {
         return
     }
-    const raw = String(reminderTimeEditDraft.value || '').trim()
-    if (!raw) {
+    const dt = reminderTimeEditDate.value
+    if (!dt || !Number.isFinite(dt.getTime())) {
         ElMessage.warning('请选择时间')
         return
     }
-    const d = new Date(raw)
-    if (!Number.isFinite(d.getTime())) {
-        ElMessage.warning('时间无效')
-        return
-    }
-    const remindAt = d.toISOString()
+    const remindAt = dt.toISOString()
     reminderTimeEditSaving.value = true
     try {
         const r = await fetch(`/api/todos/${row.id}/remind-at`, {
@@ -2628,8 +2621,6 @@ async function requestTodoNotificationPermission() {
 onMounted(() => {
     if (typeof window !== 'undefined') {
         speechSupported.value = !!getSpeechRecognitionCtor()
-        bellScreenPos.value = loadBellScreenPosFromStorage()
-        window.addEventListener('resize', onBellWindowResize, { passive: true })
         window.addEventListener('resize', onRatingsChartResize, { passive: true })
         loadWhisperAsrFromStorage()
         loadChatPersonaLocalStorage()
@@ -4119,7 +4110,7 @@ function openPaperContextChat() {
 function openPaperDeepDialog() {
     const excerpt = (paperRawText.value || '').trim().slice(0, PAPER_CHAT_ATTACH_MAX)
     if (!excerpt) {
-        ElMessage.warning('请先有文献正文')
+        ElMessage.warning('请先有正文材料')
         return
     }
     const truncatedNote =
@@ -4157,11 +4148,9 @@ function openPaperDeepDialog() {
 onBeforeUnmount(() => {
     revokePaperPdfUrl()
     stopSpeechInput()
-    teardownBellDragListeners()
     document.removeEventListener('mousemove', onChatHistoryResizeMouseMove)
     document.removeEventListener('mouseup', onChatHistoryResizeMouseUp)
     if (typeof window !== 'undefined') {
-        window.removeEventListener('resize', onBellWindowResize)
         window.removeEventListener('resize', onRatingsChartResize)
         window.removeEventListener('resize', updateChatLayoutNarrow)
         disposeRatingsChart()
@@ -4385,14 +4374,6 @@ async function testModelConnection() {
 function modelTypeLabel(type) {
     const map = { aliyun: '阿里云百炼', openai: 'OpenAI 兼容', openclaw: '会意助手本地网关' }
     return map[type] || type
-}
-
-function openQuick() {
-  quickActionOpen.value = true
-}
-
-function closeQuick() {
-  quickActionOpen.value = false
 }
 
 async function renderDocxPreview(arrayBuffer) {
@@ -4914,14 +4895,12 @@ async function handleExportWord() {
         <button
             v-if="isImmersiveWorkbenchTab && userStore.user?.email"
             type="button"
-            class="immersive-todo-floating immersive-todo-floating--root"
-            :class="{ 'immersive-todo-floating--dragging': bellDragging }"
-            :style="{ left: `${bellScreenPos.x}px`, top: `${bellScreenPos.y}px`, right: 'auto' }"
-            title="待办事项（可拖动位置）"
+            class="immersive-todo-bell-fixed topbar-todo-bell"
+            title="待办事项"
             aria-label="待办事项"
-            @pointerdown="onBellPointerDown"
+            @click="openTodoDrawer"
         >
-            <span class="topbar-todo-bell-icon" aria-hidden="true">&#128276;</span>
+            <span class="topbar-todo-bell-icon" aria-hidden="true">🔔</span>
             <span v-if="todoPendingCount > 0" class="topbar-todo-badge">{{ todoPendingCount > 99 ? '99+' : todoPendingCount }}</span>
         </button>
             <!-- Topbar（沉浸 Tab 隐藏，把高度还给聊天区） -->
@@ -4930,18 +4909,9 @@ async function handleExportWord() {
                     <h1 class="page-title">{{ pageTitle }}</h1>
                     <span class="breadcrumb">首页 / 工作台</span>
                 </div>
-                <div class="topbar-actions">
-                    <div class="search-box">
-                        <label class="sr-only" for="dashboard-doc-search">搜索文档与模板</label>
-                        <span class="search-icon">&#8981;</span>
-                        <input
-                            id="dashboard-doc-search"
-                            name="dashboard_doc_search"
-                            type="search"
-                            placeholder="搜索文档、模板..."
-                            autocomplete="off"
-                        />
-                    </div>
+                <div class="topbar-actions topbar-actions--end">
+                    <!-- Teleport 挂载点：API 配置页的「新增配置」会传送至此，顺序为 [新增配置][🔔][头像] -->
+                    <div id="header-page-actions" class="header-page-actions"></div>
                     <button
                         v-if="userStore.user?.email"
                         type="button"
@@ -4950,22 +4920,28 @@ async function handleExportWord() {
                         aria-label="待办事项"
                         @click="openTodoDrawer"
                     >
-                        <span class="topbar-todo-bell-icon" aria-hidden="true">&#128276;</span>
+                        <span class="topbar-todo-bell-icon" aria-hidden="true">🔔</span>
                         <span v-if="todoPendingCount > 0" class="topbar-todo-badge">{{ todoPendingCount > 99 ? '99+' : todoPendingCount }}</span>
                     </button>
-                    <button class="btn btn-outline btn-sm" type="button" @click="syncDashboardData">同步</button>
-                    <button class="btn btn-primary btn-sm" @click="openQuick">快速操作</button>
-                    <button
-                        v-if="userStore.user?.email && typeof Notification !== 'undefined'"
-                        type="button"
-                        class="btn btn-ghost btn-sm"
-                        title="浏览器通知用于待办到时提醒"
-                        @click="requestTodoNotificationPermission"
-                    >
-                        通知权限
-                    </button>
+                    <el-dropdown v-if="userStore.user?.email" trigger="click" placement="bottom-end">
+                        <button type="button" class="topbar-user-chip" title="个人中心" aria-label="个人中心">
+                            <span class="topbar-user-avatar">{{ (userStore.user?.name || 'U').charAt(0).toUpperCase() }}</span>
+                            <span class="topbar-user-name">{{ userStore.user?.name || '用户' }}</span>
+                        </button>
+                        <template #dropdown>
+                            <el-dropdown-menu>
+                                <el-dropdown-item @click="goTab('identity')">多身份切换</el-dropdown-item>
+                                <el-dropdown-item @click="goTab('apiConfig')">API 与模型</el-dropdown-item>
+                                <el-dropdown-item divided @click="handleLogout">退出登录</el-dropdown-item>
+                            </el-dropdown-menu>
+                        </template>
+                    </el-dropdown>
                 </div>
             </div>
+
+            <Teleport v-if="currentTab === 'apiConfig' && userStore.user?.email" to="#header-page-actions">
+                <el-button type="primary" round :icon="Plus" class="header-api-add-btn" @click="openModelModal(null)">新增配置</el-button>
+            </Teleport>
 
             <div v-if="dueTodoAlertVisible" class="dashboard-reminder-bar" role="alert">
                 <div
@@ -5016,6 +4992,8 @@ async function handleExportWord() {
                                             'todo-drawer-status-tag--pending': todoStatusDisplay(t).kind === 'pending',
                                             'todo-drawer-status-tag--notified': todoStatusDisplay(t).kind === 'notified',
                                             'todo-drawer-status-tag--done': todoStatusDisplay(t).kind === 'done',
+                                            'todo-drawer-status-tag--repeat': todoStatusDisplay(t).kind === 'repeat',
+                                            'todo-drawer-status-tag--repeat_cleared': todoStatusDisplay(t).kind === 'repeat_cleared',
                                         }"
                                     >{{ todoStatusDisplay(t).label }}</span>
                                     <span
@@ -5027,24 +5005,31 @@ async function handleExportWord() {
                                         }"
                                     >{{ todoRepeatTag(t.repeatMode, t.repeatCustomDays).label }}</span>
                                 </div>
-                                <span class="todo-drawer-meta">{{ t.remindAt }}{{ t.source ? ' · ' + t.source : '' }}</span>
+                                <span class="todo-drawer-meta">{{ formatLocalDateTimeWithRelative(t.remindAt) }}{{ t.source ? ' · ' + t.source : '' }}</span>
                                 <p v-if="t.notes" class="todo-drawer-notes">{{ t.notes }}</p>
                             </div>
                             <div class="todo-drawer-actions">
                                 <button
-                                    v-if="Number(t.done) === 0 && isTodoPastDue(t)"
+                                    v-if="Number(t.done) === 0"
                                     type="button"
                                     class="btn btn-accent btn-xs todo-snooze-btn"
-                                    :disabled="todoSnoozingId === t.id"
-                                    @click="snoozeTodoRow(t, 10)"
+                                    @click="openReminderTimeEdit(t)"
                                 >
                                     <span class="todo-snooze-inner">
                                         <el-icon :size="14"><AlarmClock /></el-icon>
-                                        10 分钟后再提醒
+                                        ⏰ 调整时间
                                     </span>
                                 </button>
                                 <button v-if="Number(t.done) === 0" type="button" class="btn btn-outline btn-xs" @click="markTodoDoneRow(t)">完成</button>
-                                <button type="button" class="btn btn-ghost btn-xs" @click="deleteTodoRow(t)">删除</button>
+                                <button
+                                    type="button"
+                                    class="btn btn-ghost btn-xs todo-card-delete-btn"
+                                    title="删除待办"
+                                    aria-label="删除待办"
+                                    @click="confirmDeleteTodoRow(t)"
+                                >
+                                    <el-icon :size="16"><Delete /></el-icon>
+                                </button>
                             </div>
                         </li>
                     </ul>
@@ -5079,9 +5064,9 @@ async function handleExportWord() {
                             <el-icon class="stat-metric-icon" :size="30"><Reading /></el-icon>
                         </div>
                         <div class="stat-metric-body">
-                            <div class="stat-metric-label">文献处理次数</div>
+                            <div class="stat-metric-label">长文处理次数</div>
                             <div class="stat-metric-value">{{ dashboardStats.papers_processed }}</div>
-                            <div class="stat-metric-foot">文献摘要与结构化笔记持续累积</div>
+                            <div class="stat-metric-foot">长文速读与卡片化摘要累计次数</div>
                         </div>
                     </div>
                     <div class="stat-card stat-card--ratings-trend">
@@ -5103,19 +5088,19 @@ async function handleExportWord() {
                 </div>
 
                 <div class="template-showcase">
-                    <h2>智能模板引擎 — 核心创新</h2>
-                    <p class="subtitle">使用 <strong>{变量}</strong> 与 <strong>&#123;&#123;自动填充&#125;&#125;</strong> 语法创建模板，AI 自动识别并精准填写。</p>
+                    <h2>智能模板引擎</h2>
+                    <p class="subtitle">
+                        在<strong>个人资料库 · 我的模板库</strong>中上传 <code>.docx</code> 模板；在本页使用
+                        <strong>&#123;&#123;自动填充&#125;&#125;</strong> 与 <strong>{变量}</strong> 创建与编辑模板、一键调用填充并导出 Word。
+                    </p>
                     <div class="template-code-block">
-                        <span style="color:#6c7086;"># 会议纪要模板 v2.0</span><br>
-                        <span style="color:#a6e3a1;">## 会议主题：</span><span class="token-var">{会议主题}</span><br>
-                        <span style="color:#a6e3a1;">## 时间地点：</span><span class="token-fill">&#123;&#123;自动提取时间地点&#125;&#125;</span><br>
-                        <span style="color:#a6e3a1;">## 参会人员：</span><span class="token-fill">&#123;&#123;从录音中识别参会人&#125;&#125;</span><br>
-                        <span style="color:#a6e3a1;">## 核心决议</span><br>
-                        <span style="color:#f38ba8;">决议类型：</span><span class="token-var">{决议类型}</span><br>
-                        <span style="color:#a6e3a1;">## 待办事项</span><br>
-                        <span class="token-var">{待办事项列表}</span> <span style="color:#6c7086;">AI自动提取并推送日历</span><br>
-                        <span style="color:#a6e3a1;">## 分歧点</span><br>
-                        <span class="token-var">{主要分歧}</span> <span style="color:#6c7086;">自动归纳不同意见</span>
+                        <span style="color:#6c7086;"># 示例：周报骨架</span><br>
+                        <span style="color:#a6e3a1;">## 本周重点</span><br>
+                        <span class="token-fill">&#123;&#123;自动填充本周关键进展&#125;&#125;</span><br>
+                        <span style="color:#a6e3a1;">## 风险与依赖</span><br>
+                        <span class="token-var">{风险项}</span> <span style="color:#6c7086;">（自行命名变量，由模型按上下文补全）</span><br>
+                        <span style="color:#a6e3a1;">## 下周计划</span><br>
+                        <span class="token-var">{下周计划要点}</span>
                     </div>
                     <div class="template-demo-row">
                         <div v-if="false" class="template-demo-card" @click="goTab('templates')">
@@ -5123,21 +5108,39 @@ async function handleExportWord() {
                             <div class="label">会议纪要模板</div>
                             <div class="hint">12个变量 · 自动填充</div>
                         </div>
+                        <div class="template-demo-card" @click="goTab('library')">
+                            <div class="demo-icon">&#9634;</div>
+                            <div class="label">我的模板库</div>
+                            <div class="hint">上传与管理 .docx</div>
+                        </div>
                         <div class="template-demo-card" @click="goTab('templates')">
-                            <div class="demo-icon">&#9633;</div>
-                            <div class="label">论文摘要模板</div>
-                            <div class="hint">8个变量 · 结构化卡片</div>
+                            <div class="demo-icon demo-icon--ep" aria-hidden="true"><el-icon :size="22"><Document /></el-icon></div>
+                            <div class="label">创建 / 编辑 / 调用</div>
+                            <div class="hint">填充变量 · 导出 Word</div>
                         </div>
                         <div v-if="false" class="template-demo-card" @click="goTab('templates')">
                             <div class="demo-icon">&#9650;</div>
                             <div class="label">PPT大纲模板</div>
                             <div class="hint">逐页自动生成</div>
                         </div>
-                        <div class="template-demo-card" @click="goTab('templates')">
-                            <div class="demo-icon demo-icon--ep" aria-hidden="true"><el-icon :size="22"><Document /></el-icon></div>
-                            <div class="label">周报汇报模板</div>
-                            <div class="hint">结构化条目 · 一键填充</div>
-                        </div>
+                    </div>
+                </div>
+
+                <div class="longread-showcase card-like">
+                    <div class="longread-showcase__icon" aria-hidden="true">
+                        <el-icon :size="28"><Reading /></el-icon>
+                    </div>
+                    <div class="longread-showcase__body">
+                        <h2 class="longread-showcase__title">智能长文速读</h2>
+                        <p class="longread-showcase__lead">
+                            上传 PDF / Word 或拉取网页正文，一键生成<strong>类型识别 + 卡片化要点</strong>，节省通读时间；并可嗅探文中潜在待办，批量汇入「主动提醒」。
+                        </p>
+                        <ul class="longread-showcase__bullets">
+                            <li>自适应维度：论文、新闻、手册、纪要等不同体裁自动换用不同卡片结构</li>
+                            <li>可带入对话助手，基于摘要与原文节选深度追问</li>
+                            <li>发现行动项时支持「批量加入我的待办」</li>
+                        </ul>
+                        <el-button type="primary" plain size="small" class="longread-showcase__cta" @click="goTab('paper')">进入智能长文速读</el-button>
                     </div>
                 </div>
 
@@ -5156,8 +5159,8 @@ async function handleExportWord() {
                     <div class="card" @click="goTab('paper')">
                         <div class="card-icon green">&#9633;</div>
                         <span class="card-badge badge-pro">PRO</span>
-                        <h3>文献论文摘要</h3>
-                        <p>上传PDF→读取+检索补充→结构化笔记卡片（方法/创新/局限）</p>
+                        <h3>智能长文速读</h3>
+                        <p>PDF / Word / 网页正文 → 卡片化核心要点；嗅探潜在待办并一键加入提醒引擎</p>
                         <span class="card-arrow">&#8594;</span>
                     </div>
                     <div v-if="false" class="card" @click="goTab('ppt')">
@@ -5185,7 +5188,7 @@ async function handleExportWord() {
                     <h3>最近活动</h3>
                 </div>
                 <p class="activity-placeholder">
-                    暂无集中的操作流水；上方数字来自服务端统计。在各功能 Tab 中完成的文档、文献与对话会反映在数据中。
+                    暂无集中的操作流水；上方数字来自服务端统计。在各功能 Tab 中完成的文档、长文速读与对话会反映在数据中。
                 </p>
             </div>
 
@@ -5293,6 +5296,11 @@ async function handleExportWord() {
                                 </span>
                             </div>
                             <div class="chat-gemini-toolbar-actions">
+                                <TodoBell
+                                    v-if="userStore.user?.email"
+                                    :count="todoPendingCount"
+                                    @open="openTodoDrawer"
+                                />
                                 <button type="button" class="btn btn-ghost btn-xs" @click="impressionDrawerVisible = true">眼中的你</button>
                                 <button
                                     type="button"
@@ -5701,7 +5709,7 @@ async function handleExportWord() {
                                 <li v-for="row in templateFillRecords" :key="row.id" class="library-row">
                                     <div class="library-row-main">
                                         <strong>{{ row.templateName || '未命名模板' }}</strong>
-                                        <span>{{ row.createdAt }}</span>
+                                        <span>{{ formatLocalDateTime(row.createdAt) }}</span>
                                     </div>
                                     <div class="library-row-actions">
                                         <button type="button" class="btn btn-outline btn-xs" @click="applyTemplateRecordVariables(row)">复用变量</button>
@@ -5766,7 +5774,7 @@ async function handleExportWord() {
                                 <p v-else-if="row.contentText" class="library-file-excerpt">{{ String(row.contentText).slice(0, 160) }}</p>
                                 <div class="library-file-meta">
                                     <span class="lib-folder-inline"><el-icon :size="13"><Folder /></el-icon> {{ row.folderPath || '未分组' }}</span>
-                                    <span>{{ row.createdAt }}</span>
+                                    <span>{{ formatLocalDateTime(row.createdAt) }}</span>
                                     <span v-if="row.tags?.length">{{ row.tags.join(' / ') }}</span>
                                 </div>
                             </div>
@@ -5788,7 +5796,7 @@ async function handleExportWord() {
     <!-- ===== TAB: PAPER（全屏学术工作站 · 双栏） ===== -->
     <div v-show="currentTab === 'paper'" class="tab-content tab-paper" id="tabPaper">
         <div v-if="!paperWorkbenchHasSource" class="paper-tab-empty">
-            <el-empty description="请先上传文献，我将为您生成结构化摘要" :image-size="88">
+            <el-empty description="请先上传 PDF / Word 或拉取链接正文，再生成智能长文速读卡片" :image-size="88">
                 <template #default>
                     <p class="paper-empty-hint">支持 PDF / Word（推荐 .docx；旧版 .doc 请先另存为 .docx），或通过链接拉取正文后再生成摘要。</p>
                     <div class="paper-empty-upload">
@@ -5901,9 +5909,9 @@ async function handleExportWord() {
                                     <el-button size="small" type="primary" plain :loading="paperFetchLoading" @click="fetchPaperFromUrl">拉取网页</el-button>
                                 </div>
                                 <details class="paper-details">
-                                    <summary class="paper-details-summary">文献标题、摘录与合并（可选展开）</summary>
+                                    <summary class="paper-details-summary">标题、摘录与合并（可选展开）</summary>
                                     <div class="paper-details-body">
-                                        <label class="paper-mini-label" for="tab-paper-doc-title">文献标题（可选）</label>
+                                        <label class="paper-mini-label" for="tab-paper-doc-title">文档标题（可选）</label>
                                         <input
                                             id="tab-paper-doc-title"
                                             v-model="paperTitle"
@@ -5953,6 +5961,36 @@ async function handleExportWord() {
                                         <p class="nb-body">{{ entry.value }}</p>
                                     </section>
                                 </div>
+                                <div v-if="paperPotentialTodosList.length" class="paper-potential-todos" role="status">
+                                    <p class="paper-potential-todos__tip">
+                                        💡 发现 {{ paperPotentialTodosList.length }} 条潜在待办，请勾选后加入
+                                    </p>
+                                    <ul class="paper-potential-todos__list">
+                                        <li
+                                            v-for="(pt, pidx) in paperPotentialTodosList"
+                                            :key="`pt-${pidx}-${pt.title.slice(0, 24)}`"
+                                            class="paper-potential-todos__row"
+                                        >
+                                            <el-checkbox
+                                                :model-value="!!paperPotentialTodoPick[pidx]"
+                                                :disabled="!userStore.user?.email || paperPotentialSubmitting"
+                                                @change="(v) => setPaperPotentialPick(pidx, v)"
+                                            >
+                                                <span class="paper-potential-todos__title">{{ pt.title }}</span>
+                                                <span v-if="pt.remind_time" class="paper-potential-todos__time">{{ pt.remind_time }}</span>
+                                            </el-checkbox>
+                                        </li>
+                                    </ul>
+                                    <el-button
+                                        type="primary"
+                                        size="small"
+                                        :loading="paperPotentialSubmitting"
+                                        :disabled="!userStore.user?.email || paperPotentialSubmitting"
+                                        @click="addSelectedPaperPotentialTodos"
+                                    >
+                                        加入我的待办
+                                    </el-button>
+                                </div>
                                 <div class="paper-chat-actions">
                                     <el-button type="primary" class="paper-deep-btn paper-deep-btn--half" @click="openPaperContextChat">
                                         带入上下文对话
@@ -5986,7 +6024,7 @@ async function handleExportWord() {
                                 生成结构化卡片
                             </el-button>
                             <p v-if="paperUploadParsing" class="paper-phase-msg">正在通过服务器解析上传文件…</p>
-                            <p v-else-if="paperAiReading" class="paper-phase-msg">AI 正在研读论文并提取要点…</p>
+                            <p v-else-if="paperAiReading" class="paper-phase-msg">AI 正在通读材料并提取要点…</p>
                         </div>
                     </el-card>
                 </div>
@@ -6054,13 +6092,16 @@ async function handleExportWord() {
 <!-- ===== TAB: COMPANION ===== -->
 <div v-show="currentTab === 'companion'" class="tab-content tab-companion" id="tabCompanion">
     <div class="chat-container companion-chat-shell chat-container--immersive">
-        <div class="chat-header">
+        <div class="chat-header companion-chat-header-row">
             <div class="chat-avatar companion-avatar">&#9825;</div>
-            <div>
+            <div class="companion-chat-header-text">
                 <div class="chat-title">情感陪伴 · 暖心扣字</div>
                 <div class="chat-status companion-status">在这儿陪你</div>
             </div>
-            <button type="button" class="btn btn-ghost btn-xs" style="margin-left:auto;" @click="clearCompanionChat" title="清空并重置开场">清空</button>
+            <div class="companion-header-actions">
+                <TodoBell v-if="userStore.user?.email" :count="todoPendingCount" @open="openTodoDrawer" />
+                <button type="button" class="btn btn-ghost btn-xs" @click="clearCompanionChat" title="清空并重置开场">清空</button>
+            </div>
         </div>
         <div class="companion-persona-panel">
             <div class="companion-persona-row">
@@ -6342,6 +6383,17 @@ async function handleExportWord() {
                         <button
                             type="button"
                             class="reminders-board-tab"
+                            :class="{ 'reminders-board-tab--active': remindersBoardTab === 'recurring' }"
+                            role="tab"
+                            :aria-selected="remindersBoardTab === 'recurring'"
+                            @click="remindersBoardTab = 'recurring'"
+                        >
+                            循环任务
+                            <span class="reminders-board-tab-count">{{ remindersRecurringBoard.length }}</span>
+                        </button>
+                        <button
+                            type="button"
+                            class="reminders-board-tab"
                             :class="{ 'reminders-board-tab--active': remindersBoardTab === 'pushed' }"
                             role="tab"
                             :aria-selected="remindersBoardTab === 'pushed'"
@@ -6357,12 +6409,16 @@ async function handleExportWord() {
                         class="todo-drawer-empty"
                     >暂无待推送项（未到点或已全部推送的提醒见「已推送记录」）</div>
                     <div
+                        v-else-if="remindersBoardTab === 'recurring' && remindersRecurringBoard.length === 0"
+                        class="todo-drawer-empty"
+                    >暂无进行中的循环任务</div>
+                    <div
                         v-else-if="remindersBoardTab === 'pushed' && remindersPushedBoard.length === 0"
                         class="todo-drawer-empty"
                     >暂无已推送记录</div>
                     <ul v-else class="reminder-alarm-cards reminder-board-cards">
                         <li
-                            v-for="t in (remindersBoardTab === 'pending' ? remindersPendingBoard : remindersPushedBoard)"
+                            v-for="t in remindersBoardListActive"
                             :key="`rb-${t.id}`"
                             class="todo-alarm-card reminder-alarm-card reminder-board-card"
                         >
@@ -6371,37 +6427,29 @@ async function handleExportWord() {
                                 <div class="todo-alarm-card__head">
                                     <strong class="reminder-card-title">{{ t.title }}</strong>
                                     <span
-                                        class="todo-mode-tag"
-                                        :class="{
-                                            'todo-mode-tag--daily': todoRepeatTag(t.repeatMode, t.repeatCustomDays).kind === 'daily',
-                                            'todo-mode-tag--workday': todoRepeatTag(t.repeatMode, t.repeatCustomDays).kind === 'workday',
-                                            'todo-mode-tag--custom': todoRepeatTag(t.repeatMode, t.repeatCustomDays).kind === 'custom',
-                                        }"
-                                    >{{ todoRepeatTag(t.repeatMode, t.repeatCustomDays).label }}</span>
+                                        v-if="String(t.repeatMode || 'once').toLowerCase() !== 'once'"
+                                        class="todo-mode-tag todo-mode-tag--repeat-banner"
+                                    >🔁 循环提醒</span>
+                                    <span v-else class="todo-mode-tag todo-mode-tag--once">单次</span>
                                 </div>
-                                <span class="reminder-card-meta">{{ t.remindAt }}{{ t.source ? ' · ' + t.source : '' }}</span>
+                                <span class="reminder-card-meta">{{ formatLocalDateTimeWithRelative(t.remindAt) }}{{ t.source ? ' · ' + t.source : '' }}</span>
                                 <p v-if="t.notes" class="todo-drawer-notes">{{ t.notes }}</p>
-                                <div v-if="remindersBoardTab === 'pending' && Number(t.done) === 0" class="reminder-board-actions">
-                                    <button type="button" class="btn btn-outline btn-xs" title="修改时间" @click="openReminderTimeEdit(t)">
-                                        ✏️ 修改时间
+                                <div
+                                    v-if="(remindersBoardTab === 'pending' || remindersBoardTab === 'recurring') && Number(t.done) === 0"
+                                    class="reminder-board-actions"
+                                >
+                                    <button type="button" class="btn btn-accent btn-xs" title="调整提醒时间" @click="openReminderTimeEdit(t)">
+                                        ⏰ 调整时间
                                     </button>
+                                    <button type="button" class="btn btn-outline btn-xs" @click="markTodoDoneRow(t)">完成</button>
                                     <button
                                         type="button"
-                                        class="btn btn-ghost btn-xs"
-                                        :disabled="todoSnoozingId === t.id"
-                                        title="稍后 10 分钟"
-                                        @click="snoozeTodoRow(t, 10)"
+                                        class="btn btn-ghost btn-xs todo-card-delete-btn"
+                                        title="删除待办"
+                                        aria-label="删除待办"
+                                        @click="confirmDeleteTodoRow(t)"
                                     >
-                                        💤 +10 分钟
-                                    </button>
-                                    <button
-                                        type="button"
-                                        class="btn btn-ghost btn-xs"
-                                        :disabled="todoSnoozingId === t.id"
-                                        title="稍后 30 分钟"
-                                        @click="snoozeTodoRow(t, 30)"
-                                    >
-                                        💤 +30 分钟
+                                        <el-icon :size="16"><Delete /></el-icon>
                                     </button>
                                 </div>
                             </div>
@@ -6413,9 +6461,15 @@ async function handleExportWord() {
     </div>
 </div>
 
-<el-dialog v-model="reminderTimeEditOpen" title="修改提醒时间" width="420px" append-to-body destroy-on-close>
-    <label class="sr-only" for="reminder-edit-time">新的提醒时间</label>
-    <input id="reminder-edit-time" v-model="reminderTimeEditDraft" type="datetime-local" class="reminder-input" style="width:100%" />
+<el-dialog v-model="reminderTimeEditOpen" title="⏰ 调整提醒时间" width="440px" append-to-body destroy-on-close>
+    <p class="reminder-time-edit-hint">选择新的日期与时间（可早于或晚于当前设定），保存后将写入主动提醒调度并重置外联推送状态。</p>
+    <el-date-picker
+        v-model="reminderTimeEditDate"
+        type="datetime"
+        placeholder="选择日期时间"
+        style="width: 100%"
+        format="YYYY-MM-DD HH:mm"
+    />
     <template #footer>
         <el-button @click="reminderTimeEditOpen = false">取消</el-button>
         <el-button type="primary" :loading="reminderTimeEditSaving" @click="saveReminderTimeEdit">保存</el-button>
@@ -6424,13 +6478,7 @@ async function handleExportWord() {
 
 <!-- ===== TAB: API CONFIG (新增API配置) ===== -->
 <div v-show="currentTab === 'apiConfig'" class="tab-content tab-api-config" id="tabApiConfig">
-    <div class="api-config-toolbar">
-        <el-button-group class="api-config-btn-group">
-            <el-button :disabled="modelConfigsLoading" @click="fetchModelConfigs">刷新列表</el-button>
-            <el-button type="primary" @click="openModelModal(null)">新增配置</el-button>
-        </el-button-group>
-    </div>
-    <p class="api-config-intro">对话与模板填充将自动选用「已启用且优先级最高」的一条配置；数字越大优先级越高。列表中的 Key 为脱敏展示。【模型 ID】须与百炼 Code 一致（小写，如 <code>glm-5.1</code>、<code>qwen-plus</code>）；保存与请求时会自动转为小写。展示名可另填「GLM-5.1」等便于识别。</p>
+    <p class="api-config-intro">对话与模板填充将自动选用「已启用且优先级最高」的一条配置；数字越大优先级越高。列表中的 Key 为脱敏展示。【模型 ID】须与百炼 Code 一致（小写，如 <code>glm-5.1</code>、<code>qwen-plus</code>）；保存与请求时会自动转为小写。展示名可另填「GLM-5.1」等便于识别。请使用顶部栏「新增配置」；列表会在打开本页时自动加载。</p>
 
     <!-- ASR：界面隐藏；配置仍由 loadWhisperAsrFromStorage / saveWhisperAsrToStorage 写入 localStorage，会议纪要页可读 -->
     <div v-if="false" class="api-config-panel-card">
@@ -6530,7 +6578,7 @@ async function handleExportWord() {
                 </el-button-group>
             </div>
         </div>
-        <div v-if="modelConfigs.length === 0" class="model-config-empty">暂无模型配置。请点击「新增配置」，或在首次启动时编辑数据库中的默认占位项并填写密钥。</div>
+        <div v-if="modelConfigs.length === 0" class="model-config-empty">暂无模型配置。请点击右上角「新增配置」，或在首次启动时编辑数据库中的默认占位项并填写密钥。</div>
     </div>
 </div>
 
@@ -6726,20 +6774,6 @@ async function handleExportWord() {
     </div>
 </div>
 
-<!-- ==================== MODAL: QUICK ACTION ==================== -->
-<div v-show="quickActionOpen" class="modal-overlay" id="quickActionModal" @click.self="closeQuick">
-    <div class="modal">
-        <button class="modal-close" @click="closeQuick">&#10005;</button>
-        <h2 style="margin-bottom:12px;">快速操作</h2>
-        <div style="display:flex;flex-direction:column;gap:8px;">
-            <button class="btn btn-outline" style="width:100%;justify-content:flex-start;" @click="closeQuick(); goTab('meeting')">新建会议纪要</button>
-            <button class="btn btn-outline" style="width:100%;justify-content:flex-start;" @click="closeQuick(); goTab('paper')">上传论文PDF</button>
-            <button class="btn btn-outline" style="width:100%;justify-content:flex-start;" @click="closeQuick(); goTab('templates')">创建模板</button>
-            <button class="btn btn-outline" style="width:100%;justify-content:flex-start;" @click="closeQuick(); goTab('chat')">对话助手</button>
-            <button class="btn btn-outline" style="width:100%;justify-content:flex-start;" @click="closeQuick(); goTab('apiConfig')">配置API</button>
-        </div>
-    </div>
-</div>
 </template>
 
 <style scoped>
@@ -7393,11 +7427,17 @@ async function handleExportWord() {
     display: flex;
     gap: 12px;
     align-items: stretch;
-    padding: 14px 14px 14px 12px;
+    padding: 16px 16px 16px 14px;
     border-radius: 16px;
-    border: 1px solid rgba(15, 23, 42, 0.08);
+    border: 1px solid #f0f2f5;
     background: linear-gradient(145deg, #ffffff 0%, #f8fafc 100%);
-    box-shadow: 0 4px 18px rgba(15, 23, 42, 0.06);
+    box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
+    transition: box-shadow 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+}
+
+.todo-alarm-card:hover {
+    box-shadow: 0 12px 28px rgba(15, 23, 42, 0.12);
+    border-color: #e8eaef;
 }
 
 .todo-alarm-card__time {
@@ -7478,9 +7518,143 @@ async function handleExportWord() {
     color: #047857;
 }
 
+.todo-drawer-status-tag--repeat {
+    background: #ede9fe;
+    color: #5b21b6;
+}
+
+.todo-drawer-status-tag--repeat_cleared {
+    background: #ecfdf5;
+    color: #047857;
+    border: 1px solid rgba(4, 120, 87, 0.18);
+}
+
+.todo-mode-tag--repeat-banner {
+    background: linear-gradient(135deg, #ede9fe 0%, #e9d5ff 100%);
+    color: #6b21a8;
+    border: 1px solid rgba(107, 33, 168, 0.2);
+}
+
+.todo-mode-tag--once {
+    background: #f1f5f9;
+    color: #64748b;
+}
+
+.paper-potential-todos {
+    margin-top: 14px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    border: 1px dashed rgba(79, 70, 229, 0.35);
+    background: linear-gradient(120deg, rgba(238, 242, 255, 0.95), rgba(250, 245, 255, 0.9));
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+}
+
+.paper-potential-todos__list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.paper-potential-todos__row {
+    padding: 6px 8px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.72);
+    border: 1px solid #f0f2f5;
+}
+
+.paper-potential-todos__title {
+    font-weight: 600;
+    color: #1e293b;
+}
+
+.paper-potential-todos__time {
+    display: block;
+    margin-top: 2px;
+    font-size: 0.72rem;
+    color: #64748b;
+    font-weight: 500;
+}
+
+.paper-potential-todos__tip {
+    margin: 0;
+    font-size: 0.88rem;
+    font-weight: 600;
+    color: #4338ca;
+}
+
+.longread-showcase {
+    margin-top: 28px;
+    padding: 22px 24px;
+    display: flex;
+    gap: 18px;
+    align-items: flex-start;
+    border-radius: 16px;
+    border: 1px solid rgba(99, 102, 241, 0.2);
+    background: linear-gradient(135deg, #faf5ff 0%, #eef2ff 55%, #f0fdfa 100%);
+    box-shadow: 0 10px 36px rgba(79, 70, 229, 0.08);
+}
+
+.longread-showcase__icon {
+    flex-shrink: 0;
+    width: 52px;
+    height: 52px;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(99, 102, 241, 0.12);
+    color: #4f46e5;
+}
+
+.longread-showcase__title {
+    margin: 0 0 8px;
+    font-size: 1.15rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    color: #1e1b4b;
+}
+
+.longread-showcase__lead {
+    margin: 0 0 10px;
+    font-size: 0.92rem;
+    line-height: 1.55;
+    color: #334155;
+}
+
+.longread-showcase__bullets {
+    margin: 0 0 14px;
+    padding-left: 1.1rem;
+    font-size: 0.86rem;
+    line-height: 1.55;
+    color: #475569;
+}
+
+.longread-showcase__cta {
+    border-radius: 10px !important;
+}
+
+.reminder-time-edit-hint {
+    margin: 0 0 12px;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    color: #64748b;
+}
+
 .todo-drawer-item--card.todo-alarm-card {
     box-shadow: 0 8px 28px rgba(15, 23, 42, 0.09);
-    border-color: rgba(15, 23, 42, 0.06);
+    border-color: #f0f2f5;
+}
+
+.todo-drawer-item--card.todo-alarm-card:hover {
+    box-shadow: 0 14px 36px rgba(15, 23, 42, 0.14);
 }
 
 .reminder-custom-days {
@@ -8565,24 +8739,44 @@ async function handleExportWord() {
 
 .tab-chat-gemini-root {
     padding: 0 !important;
-    min-height: min(82vh, 820px);
+    min-height: 0;
 }
 
 /* —— 全屏沉浸：仅对话助手 / 情感陪伴（根节点挂 dashboard--immersive） —— */
+.main-content.workspace-dashboard-body {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    box-sizing: border-box;
+}
+
 .main-content.workspace-dashboard-body.dashboard--immersive {
-    padding: 0 !important;
+    /* 顶侧：与视口对齐；左右底保留 safe-area */
+    padding: 0 max(8px, env(safe-area-inset-right, 0px)) max(6px, env(safe-area-inset-bottom, 0px))
+        max(8px, env(safe-area-inset-left, 0px)) !important;
     margin-top: 0 !important;
     margin-right: 0 !important;
     margin-bottom: 0 !important;
     position: relative;
-    height: 100vh;
-    min-height: 100vh;
-    max-height: 100vh;
+    flex: 1;
+    min-height: 0;
+    height: auto;
+    max-height: none;
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
     overflow: hidden;
     background: #ffffff;
+    /*
+     * #mainContent 下大量 Tab 为兄弟节点，模板中的换行/缩进会变成「仅空白」的文本节点；
+     * 在 column flex 里每个文本节点都会单独成行并占用 line-height，叠成顶部大块留白。
+     */
+    line-height: 0;
+}
+
+/* 仅恢复直接子元素的行高，避免影响内部排版上下文 */
+.main-content.workspace-dashboard-body.dashboard--immersive > * {
+    line-height: 1.6;
 }
 
 .main-content.workspace-dashboard-body.dashboard--immersive.dashboard--companion {
@@ -8602,6 +8796,10 @@ async function handleExportWord() {
     min-height: 0 !important;
 }
 
+.main-content.workspace-dashboard-body.dashboard--immersive .tab-chat-workbench.tab-chat-gemini-root {
+    padding: 0 max(6px, env(safe-area-inset-left, 0px)) max(6px, env(safe-area-inset-bottom, 0px)) max(6px, env(safe-area-inset-right, 0px)) !important;
+}
+
 .main-content.workspace-dashboard-body.dashboard--immersive .chat-gemini-layout {
     flex: 1;
     min-height: 0 !important;
@@ -8612,10 +8810,20 @@ async function handleExportWord() {
 
 .main-content.workspace-dashboard-body.dashboard--immersive .chat-gemini-main {
     min-height: 0;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
 }
 
 .main-content.workspace-dashboard-body.dashboard--immersive .chat-messages--gemini {
     background: #ffffff;
+    flex: 1;
+    min-height: 0;
+    align-self: stretch;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 8px 16px 120px;
 }
 
 .main-content.workspace-dashboard-body.dashboard--immersive .chat-suggestions.chat-suggestions--gemini {
@@ -8645,47 +8853,119 @@ async function handleExportWord() {
 }
 
 .main-content.workspace-dashboard-body.dashboard--immersive .tab-companion .chat-header {
-    padding-right: 64px;
+    padding-right: 12px;
 }
 
-.immersive-todo-floating {
-    position: absolute;
+.main-content.workspace-dashboard-body.dashboard--immersive .chat-gemini-toolbar {
+    padding: max(6px, env(safe-area-inset-top, 0px)) 12px 8px;
+    row-gap: 4px;
+}
+
+.main-content.workspace-dashboard-body.dashboard--immersive .companion-chat-shell .chat-header {
+    padding-top: max(8px, env(safe-area-inset-top, 0px));
+    padding-bottom: 10px;
+}
+
+.main-content.workspace-dashboard-body.dashboard--immersive .companion-messages {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding-top: 8px;
+}
+
+/* 沉浸对话 Tab：待办铃铛固定于主内容区右上角（随侧栏宽度偏移） */
+.immersive-todo-bell-fixed {
+    position: fixed;
     top: 16px;
-    right: 24px;
-    z-index: 9999;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
+    right: calc(var(--sidebar-width, 260px) + 20px);
+    z-index: 10050;
     width: 44px;
     height: 44px;
-    padding: 0;
     border-radius: 12px;
     border: 1px solid #e2e8f0;
     background: rgba(255, 255, 255, 0.96);
     box-shadow: 0 2px 14px rgba(15, 23, 42, 0.1);
-    cursor: pointer;
-    color: #475569;
+    padding: 0;
 }
 
-.immersive-todo-floating--root {
-    position: fixed !important;
-    top: auto;
-    right: auto;
-    bottom: auto;
-    z-index: 9999;
-    cursor: grab;
-    touch-action: none;
-    user-select: none;
-}
-
-.immersive-todo-floating--root.immersive-todo-floating--dragging {
-    cursor: grabbing;
-}
-
-.immersive-todo-floating:hover {
+.immersive-todo-bell-fixed:hover {
     background: #f8fafc;
-    color: #0f172a;
     border-color: #cbd5e1;
+}
+
+.topbar-actions--end {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: nowrap;
+    gap: 16px;
+}
+
+.header-page-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+    min-height: 0;
+}
+
+.header-api-add-btn {
+    flex-shrink: 0;
+}
+
+.topbar-user-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 200px;
+    padding: 4px 10px 4px 4px;
+    border-radius: 999px;
+    border: 1px solid #e2e8f0;
+    background: #fff;
+    cursor: pointer;
+    color: #334155;
+    font-size: 0.82rem;
+    font-weight: 600;
+}
+
+.topbar-user-chip:hover {
+    border-color: #cbd5e1;
+    background: #f8fafc;
+}
+
+.topbar-user-avatar {
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    color: #fff;
+    font-size: 0.85rem;
+    font-weight: 700;
+}
+
+.topbar-user-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.todo-card-delete-btn {
+    padding: 4px 8px;
+    min-width: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #64748b;
+}
+
+.todo-card-delete-btn:hover {
+    color: #dc2626;
+    background: #fef2f2;
 }
 
 .topbar-todo-bell {
@@ -8695,7 +8975,7 @@ async function handleExportWord() {
     justify-content: center;
     width: 38px;
     height: 38px;
-    margin-right: 4px;
+    margin-right: 0;
     border: none;
     border-radius: 10px;
     background: transparent;
@@ -8709,8 +8989,11 @@ async function handleExportWord() {
 }
 
 .topbar-todo-bell-icon {
-    font-size: 1.15rem;
+    font-size: 18px;
     line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .topbar-todo-badge {
@@ -8795,7 +9078,7 @@ async function handleExportWord() {
 .chat-gemini-layout {
     display: flex;
     flex: 1;
-    min-height: min(82vh, 820px);
+    min-height: 0;
     max-width: 100%;
     position: relative;
     background: #f8fafc;
@@ -9047,7 +9330,30 @@ async function handleExportWord() {
 .chat-gemini-toolbar-actions {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+    flex-shrink: 0;
+}
+
+.companion-chat-header-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.companion-chat-header-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.companion-header-actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
     flex-shrink: 0;
 }
 
@@ -9290,19 +9596,6 @@ async function handleExportWord() {
     width: 100%;
 }
 
-.tab-api-config .api-config-toolbar {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 14px;
-}
-
-.api-config-btn-group {
-    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
-    border-radius: 10px;
-    overflow: hidden;
-}
 
 .mcc-btn-group {
     border-radius: 8px;
@@ -10032,6 +10325,10 @@ async function handleExportWord() {
 .companion-chat-shell .chat-header {
     background: linear-gradient(92deg, #fff1f2, #fff7ed);
     border-bottom-color: #fbcfe8;
+}
+
+.companion-chat-shell .companion-chat-header-row.chat-header {
+    align-items: center;
 }
 
 .companion-persona-panel {

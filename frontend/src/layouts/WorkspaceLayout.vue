@@ -4,7 +4,6 @@
     class="dashboard-layout active"
     :class="{ 'dashboard-layout--hide-header': hideAppHeader }"
   >
-    <el-header v-if="!hideAppHeader" height="0" class="workspace-global-header" />
     <div class="workspace-main-stage">
       <WorkspaceSidebar :collapsed="sidebarCollapsed" @toggle-collapse="toggleSidebarCollapse" />
       <div
@@ -21,12 +20,11 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElHeader } from 'element-plus'
-import 'element-plus/es/components/header/style/css'
 import WorkspaceSidebar from '../components/WorkspaceSidebar.vue'
 
 const route = useRoute()
-const hideAppHeader = computed(() => route.meta.hideHeader === true)
+/** 嵌套路由子页的 meta 不会稳定出现在 route.meta 上，必须用 matched 聚合判断 */
+const hideAppHeader = computed(() => route.matched.some((r) => r.meta.hideHeader === true))
 
 const SIDEBAR_W_KEY = 'huiyi_sidebar_width_px'
 const SIDEBAR_C_KEY = 'huiyi_sidebar_collapsed'
@@ -118,17 +116,6 @@ onBeforeUnmount(() => {
   min-height: 100vh;
 }
 
-.workspace-global-header {
-  height: 0 !important;
-  min-height: 0 !important;
-  margin: 0 !important;
-  padding: 0 !important;
-  overflow: hidden !important;
-  border: none !important;
-  flex-shrink: 0;
-  line-height: 0;
-}
-
 .workspace-main-stage {
   display: flex;
   flex: 1;
@@ -142,6 +129,8 @@ onBeforeUnmount(() => {
   flex: 1;
   min-width: 0;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .workspace-sidebar-resizer {

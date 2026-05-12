@@ -1729,7 +1729,7 @@
                     <span class="nav-item-icon-text">&#9679;</span> <span>智能会议纪要</span>
                 </button>
                 <button class="nav-item" onclick="switchTab('paper', this)">
-                    <span class="nav-item-icon-text">&#9633;</span> <span>文献论文摘要</span>
+                    <span class="nav-item-icon-text">&#9633;</span> <span>智能长文速读</span>
                 </button>
                 <button class="nav-item" onclick="switchTab('polish', this)">
                     <span class="nav-item-icon-text">&#9998;</span> <span>多语言润色写作</span>
@@ -1817,13 +1817,13 @@
                 </div>
 
                 <div class="template-showcase">
-                    <h2>智能模板引擎 — 核心创新</h2>
+                    <h2>智能模板引擎 </h2>
                     <p class="subtitle">使用 <strong>{变量}</strong>、<strong>[选项]</strong>、<strong>{{自动填充}}</strong> 语法创建模板，AI自动识别并精准填写。告别重复的格式指令！</p>
                     <div class="template-code-block">
                         <span style="color:#6c7086;"># 会议纪要模板 v2.0</span><br>
                         <span style="color:#a6e3a1;">## 会议主题：</span><span class="token-var">{会议主题}</span><br>
                         <span style="color:#a6e3a1;">## 时间地点：</span><span class="token-fill">{{自动提取时间地点}}</span><br>
-                        <span style="color:#a6e3a1;">## 参会人员：</span><span class="token-fill">{{从录音中识别参会人}}</span><br>
+                        <!-- <span style="color:#a6e3a1;">## 参会人员：</span><span class="token-fill">{{从录音中识别参会人}}</span><br> -->
                         <span style="color:#a6e3a1;">## 核心决议</span><br>
                         <span style="color:#f38ba8;">决议类型：</span><span class="token-bracket">[通过|否决|延期讨论]</span><br>
                         <span style="color:#a6e3a1;">## 待办事项</span><br>
@@ -1870,7 +1870,7 @@
                     <div class="card" onclick="switchTab('paper', document.querySelector('.nav-item:nth-child(5)'))">
                         <div class="card-icon green">&#9633;</div>
                         <span class="card-badge badge-pro">PRO</span>
-                        <h3>文献论文摘要</h3>
+                        <h3>智能长文速读</h3>
                         <p>上传PDF→读取+检索补充→结构化笔记卡片（方法/创新/局限）</p>
                         <span class="card-arrow">&#8594;</span>
                     </div>
@@ -2022,7 +2022,7 @@
         <div class="cards-grid">
             <div class="card" style="grid-column:1/-1;max-width:600px;">
                 <div class="card-icon green">&#9633;</div>
-                <h3>文献论文摘要 — 结构化笔记卡片</h3>
+                <h3>智能长文速读 — 结构化笔记卡片</h3>
                 <p>上传PDF或粘贴论文链接，AI读取全文并生成：研究问题/方法创新/实验结果/局限/可引观点</p>
                 <input type="text" placeholder="粘贴论文URL 或 arXiv链接..." style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:var(--radius);font-family:var(--font-sans);margin-top:10px;">
                 <div style="text-align:center;color:var(--text-muted);margin:10px 0;">— 或 —</div>
@@ -2553,7 +2553,7 @@
             templates: '智能模板引擎',
             chat: '对话助手',
             meeting: '智能会议纪要',
-            paper: '文献论文摘要',
+            paper: '智能长文速读',
             polish: '多语言润色写作',
             ppt: 'PPT大纲生成',
             companion: '情感陪伴式对话',
@@ -2568,7 +2568,7 @@
     // ==================== CHAT FUNCTIONALITY (对话助手) ====================
     const chatIntents = [
         { keywords: ['会议纪要', '会议记录', '创建会议', '做会议', '帮我开会'], tab: 'meeting', response: '已为你打开<strong>智能会议纪要</strong>页面。你可以上传录音文件或粘贴文字记录，我会帮你生成结构化纪要。', action: 'switchTab' },
-        { keywords: ['论文', '文献', '摘要', 'PDF', 'arxiv', 'paper'], tab: 'paper', response: '已切换到<strong>文献论文摘要</strong>模块。上传PDF或粘贴论文链接，我会生成结构化笔记卡片。', action: 'switchTab' },
+        { keywords: ['论文', '文献', '摘要', 'PDF', 'arxiv', 'paper'], tab: 'paper', response: '已切换到<strong>智能长文速读</strong>模块。上传PDF或粘贴论文链接，我会生成结构化笔记卡片。', action: 'switchTab' },
         { keywords: ['润色', '改写', '写作', '翻译', 'polish'], tab: 'polish', response: '已打开<strong>多语言润色写作</strong>页面。粘贴文本并选择风格，我会输出润色版本与修改说明。', action: 'switchTab' },
         { keywords: ['PPT', 'ppt', '演示', '幻灯片', '大纲', '讲稿'], tab: 'ppt', response: '已切换到<strong>PPT大纲生成</strong>。输入主题和页数，我会搜集素材并生成逐页大纲。', action: 'switchTab' },
         { keywords: ['模板', 'template', '创建模板', '模板市场'], tab: 'templates', response: '已打开<strong>智能模板引擎</strong>。使用{变量}语法定义模板，AI自动精准填充。', action: 'switchTab' },

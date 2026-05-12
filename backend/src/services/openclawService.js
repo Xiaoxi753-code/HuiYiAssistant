@@ -400,7 +400,7 @@ export function buildOpenClawMergedSystemContent(chatOptions = {}) {
   const core = buildThreeLayerCore(chatOptions);
   let merged = core;
   if (addon) {
-    merged = `${core}\n\n【附加·用户材料结构化摘要】\n该段由工作台「文献摘要」模块自动生成，用于本轮对话。请严格依据摘要与用户的后续发言作答；不得捏造摘要中未出现的具体事实、数据或人名；若用户追问细节而摘要未覆盖，请明确说明「摘要未涵盖该细节」。\n\n${addon}`;
+    merged = `${core}\n\n【附加·用户材料结构化摘要】\n该段由工作台「智能长文速读」模块自动生成，用于本轮对话。请严格依据摘要与用户的后续发言作答；不得捏造摘要中未出现的具体事实、数据或人名；若用户追问细节而摘要未覆盖，请明确说明「摘要未涵盖该细节」。\n\n${addon}`;
   }
   const baseCore = memoryBlock ? `${memoryBlock}\n\n${merged}` : merged;
   const full = skillBlock ? `${skillBlock}\n\n${baseCore}` : baseCore;
@@ -977,10 +977,11 @@ const SYSTEM_PAPER_REVIEWER =
   '2. 先判断输入内容的类型（如：学术论文、新闻报道、会议纪要、产品手册、法律文本、营销文案、技术博客、其他），将**简短类型名**写入字段 `content_type`（字符串，中文 2～8 字，便于界面展示与配色）。\n' +
   '3. 根据该类型的阅读目的，自行设计 **4～6 个**最能体现核心价值的**维度键**（键名为中文，每个键名 2～10 字，专业、具体、互不重样；禁止滥用「总结」「概述」「其他信息」等空泛键名，除非文本极短确无更好划分）。\n' +
   '4. 每个维度键对应**一条字符串值**（可含多句），精炼对应要点；所有维度值均为 string，**不要使用数组或嵌套 JSON**。\n' +
-  '5. 你的全部输出必须是**一个合法 JSON 对象**（不要使用 Markdown 代码围栏、不要添加任何解释性前后缀）。结构示例：\n' +
-  '   {"content_type":"新闻报道","核心事实":"...","影响范围":"...","关键引述或数据":"...","后续关注点":"..."}\n' +
-  '   其中除 `content_type` 外须另有 4～6 个自定义中文键。\n' +
-  '6. 除该 JSON 外不得输出任何其他字符。';
+  '5. 在总结长文时，若文中出现**建议、行动项、待跟进事项、截止日期类要求**等，请额外输出字段 `potential_todos`：**JSON 数组**，每项为对象，形状如 `{"title":"跟进某事项","remind_time":"2026-05-20T15:00:00+08:00","notes":"出处或上下文"}`；`title` 必填（简洁可执行），`remind_time` 与 `notes` 可选；时间优先 ISO8601 或 `yyyy-MM-dd HH:mm`。**若文中没有此类事项，必须输出** `potential_todos` 为空数组 `[]`，**不得省略该字段**。\n' +
+  '6. 你的全部输出必须是**一个合法 JSON 对象**（不要使用 Markdown 代码围栏、不要添加任何解释性前后缀）。结构示例：\n' +
+  '   {"content_type":"新闻报道","核心事实":"...","影响范围":"...","关键引述或数据":"...","后续关注点":"...","potential_todos":[{"title":"联系编辑部核实数据","notes":"见第三段"}]}\n' +
+  '   其中除 `content_type`、`potential_todos` 外须另有 4～6 个自定义中文要点键。\n' +
+  '7. 除该 JSON 外不得输出任何其他字符。';
 
 function stripJsonFence(s) {
   let t = String(s || '').trim();
@@ -1012,7 +1013,44 @@ export function parsePaperSummaryJson(rawText) {
   throw new Error('无法解析模型返回的 JSON');
 }
 
-const PAPER_SUMMARY_RESERVED_KEYS = new Set(['content_type']);
+const PAPER_SUMMARY_RESERVED_KEYS = new Set(['content_type', 'potential_todos']);
+
+/**
+ * @param {unknown} raw
+ * @returns {{ title: string, remind_time?: string, notes?: string }[]}
+ */
+function normalizePotentialTodosArray(raw) {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const out = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      continue;
+    }
+    const title = String(item.title || item.content || item.task || '')
+      .trim()
+      .slice(0, 500);
+    if (!title) {
+      continue;
+    }
+    const rt = item.remind_time != null ? String(item.remind_time).trim().slice(0, 120) : '';
+    const notes = item.notes != null ? String(item.notes).trim().slice(0, 2000) : '';
+    /** @type {{ title: string, remind_time?: string, notes?: string }} */
+    const row = { title };
+    if (rt) {
+      row.remind_time = rt;
+    }
+    if (notes) {
+      row.notes = notes;
+    }
+    out.push(row);
+    if (out.length >= 24) {
+      break;
+    }
+  }
+  return out;
+}
 const PAPER_SUMMARY_LEGACY_KEYS = ['research_question', 'innovation', 'results', 'limitations', 'citations'];
 
 const PAPER_LEGACY_LABELS = {
@@ -1027,7 +1065,7 @@ const PAPER_LEGACY_LABELS = {
  * 模型无法解析或归一化失败时的兜底结构（前端可安全渲染）
  * @param {string} sourceText
  * @param {string} [title]
- * @returns {{ content_type: string, dimensions: Record<string, string> }}
+ * @returns {{ content_type: string, dimensions: Record<string, string>, potential_todos: Array<{ title: string, remind_time?: string, notes?: string }> }}
  */
 export function buildAdaptivePaperSummaryFallback(sourceText, title = '') {
   const raw = String(sourceText || '').replace(/\s+/g, ' ').trim();
@@ -1042,6 +1080,7 @@ export function buildAdaptivePaperSummaryFallback(sourceText, title = '') {
     dimensions: {
       内容摘要: body,
     },
+    potential_todos: [],
   };
 }
 
@@ -1075,13 +1114,14 @@ function legacyPaperSummaryToDimensions(obj) {
 /**
  * @param {object} obj
  * @param {string} sourceTextForFallback 用户原文截断片段，用于兜底摘录
- * @returns {{ content_type: string, dimensions: Record<string, string> }}
+ * @returns {{ content_type: string, dimensions: Record<string, string>, potential_todos: { title: string, remind_time?: string, notes?: string }[] }}
  */
 export function normalizeAdaptivePaperSummary(obj, sourceTextForFallback) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
     throw new Error('摘要数据为空');
   }
   const contentType = String(obj.content_type || '').trim() || '未分类';
+  const potentialTodos = normalizePotentialTodosArray(obj.potential_todos);
   /** @type {Record<string, string>} */
   const dimensions = {};
 
@@ -1119,7 +1159,8 @@ export function normalizeAdaptivePaperSummary(obj, sourceTextForFallback) {
   if (Object.keys(merged).length === 0) {
     const fb = buildAdaptivePaperSummaryFallback(sourceTextForFallback, '');
     const ct = String(obj.content_type || '').trim();
-    return ct ? { ...fb, content_type: ct } : fb;
+    const base = ct ? { ...fb, content_type: ct } : fb;
+    return { ...base, potential_todos: potentialTodos };
   }
 
   const keys = Object.keys(merged);
@@ -1133,7 +1174,7 @@ export function normalizeAdaptivePaperSummary(obj, sourceTextForFallback) {
     merged = sliced;
   }
 
-  return { content_type: contentType, dimensions: merged };
+  return { content_type: contentType, dimensions: merged, potential_todos: potentialTodos };
 }
 
 /**
