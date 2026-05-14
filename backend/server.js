@@ -4711,6 +4711,20 @@ function buildFilledDocxBase64(buffer, values) {
     paragraphLoop: true,
     linebreaks: true,
     delimiters: { start: '{', end: '}' },
+    parser: (tag) => {
+      const key = String(tag ?? '').trim();
+      return {
+        get(scope) {
+          if (!key) {
+            return undefined;
+          }
+          if (scope && Object.prototype.hasOwnProperty.call(scope, key)) {
+            return scope[key];
+          }
+          return undefined;
+        },
+      };
+    },
     nullGetter: (part) => `{{${part.value}}}`,
   });
 
@@ -4852,7 +4866,7 @@ app.post('/api/templates/fill-stream', async (req, res) => {
       }
 
       const payload = JSON.stringify({ name: variable, value, filledDocx });
-      res.write(`event: variable\ndata: ${JSON.stringify(payload)}\n\n`);
+      res.write(`event: variable\ndata: ${payload}\n\n`);
     }
 
     let recordId = null;

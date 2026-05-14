@@ -137,6 +137,7 @@ const extractedVariables = ref([])
 const currentTemplateId = ref(null)
 const isFilling = ref(false)
 const fillError = ref('')
+const fillStreamOutput = ref('')
 const currentFile = ref(null)
 const templateArrayBuffer = ref(null)
 const lastWordBlob = ref(null)
@@ -4441,6 +4442,23 @@ function buildTemplateValues() {
     }, {})
 }
 
+function createDocxTagParser() {
+    return (tag) => {
+        const key = String(tag ?? '').trim()
+        return {
+            get(scope) {
+                if (!key) {
+                    return undefined
+                }
+                if (scope && Object.prototype.hasOwnProperty.call(scope, key)) {
+                    return scope[key]
+                }
+                return undefined
+            },
+        }
+    }
+}
+
 const MAX_AGENT_FILE_BYTES = 8 * 1024 * 1024
 
 function fileToBase64(file) {
@@ -4511,6 +4529,7 @@ async function syncToWord({ render = true } = {}) {
         paragraphLoop: true,
         linebreaks: true,
         delimiters: { start: '{', end: '}' },
+        parser: createDocxTagParser(),
         nullGetter: (part) => `{{${part.value}}}`,
     })
 
@@ -4618,6 +4637,7 @@ async function startAiFill() {
 
     fillError.value = ''
     isFilling.value = true
+    fillStreamOutput.value = ''
     extractedVariables.value.forEach((item) => {
         item.value = ''
         item.isTyping = true
@@ -4701,6 +4721,9 @@ async function startAiFill() {
                     let payload
                     try {
                         payload = JSON.parse(data)
+                        if (typeof payload === 'string') {
+                            payload = JSON.parse(payload)
+                        }
                     } catch (error) {
                         console.error('[fill-stream] parse failed', error)
                         continue
@@ -4726,6 +4749,10 @@ async function startAiFill() {
 
                 if (payload?.type === 'delta' && typeof payload.text === 'string') {
                     fullTextBuffer += payload.text
+                    fillStreamOutput.value += payload.text
+                    if (fillStreamOutput.value.length > 8000) {
+                        fillStreamOutput.value = fillStreamOutput.value.slice(-8000)
+                    }
                     const regex = /"([^"]+)"\s*:\s*"([^"]*)"/g
                     let match
                     while ((match = regex.exec(fullTextBuffer)) !== null) {
@@ -4862,6 +4889,7 @@ function resetTemplateFile() {
     extractedVariables.value = []
     previewError.value = ''
     fillError.value = ''
+    fillStreamOutput.value = ''
     if (wordContainer.value) {
         wordContainer.value.innerHTML = ''
     }
@@ -4873,13 +4901,21 @@ async function handleExportWord() {
         return
     }
 
-    await syncToWord({ render: false })
+    try {
+        await syncToWord({ render: false })
+    } catch (error) {
+        console.error('[docx export] failed', error)
+        showToast('error', '导出失败，请稍后重试')
+        return
+    }
     if (!lastWordBlob.value) {
         showToast('error', '导出失败，请稍后重试')
         return
     }
 
-    saveAs(lastWordBlob.value, 'huiyi-template.docx')
+    const originalName = String(currentFile.value?.name || 'huiyi-template.docx')
+    const safeBase = originalName.replace(/\.docx$/i, '') || 'huiyi-template'
+    saveAs(lastWordBlob.value, `${safeBase}-filled.docx`)
 }
 </script>
 
@@ -5599,7 +5635,7 @@ async function handleExportWord() {
                                 <button class="btn-fill" :disabled="isFilling || extractedVariables.length === 0" @click="startAiFill">
                                     {{ isFilling ? 'AI 填充中...' : 'AI 自动填充' }}
                                 </button>
-                                <button class="btn-export" :disabled="!currentTemplateId" @click="handleExportWord">导出 Word</button>
+                                <button class="btn-export" :disabled="!templateArrayBuffer" @click="handleExportWord">导出 Word</button>
                                 <button class="btn-reset" @click="resetTemplateFile">重选</button>
                             </div>
                             <div class="panel-title">变量配置面板</div>
@@ -5626,6 +5662,10 @@ async function handleExportWord() {
                                     </div>
                                 </li>
                             </ul>
+                            <div v-if="isFilling || fillStreamOutput" class="panel-stream">
+                                <div class="panel-stream-title">流式输出</div>
+                                <pre class="panel-stream-body">{{ fillStreamOutput || '等待模型输出…' }}</pre>
+                            </div>
                             <div v-if="fillError" class="panel-error">{{ fillError }}</div>
                         </div>
                     </div>
@@ -7840,6 +7880,32 @@ async function handleExportWord() {
     background: #fff;
     padding: 1px 6px;
     border-radius: 4px;
+}
+
+.panel-stream {
+    margin-top: 12px;
+    border: 1px dashed #cbd5e1;
+    border-radius: 12px;
+    padding: 10px 12px;
+    background: #f8fafc;
+}
+
+.panel-stream-title {
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: #334155;
+    margin-bottom: 6px;
+}
+
+.panel-stream-body {
+    margin: 0;
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: #475569;
+    max-height: 180px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 .template-folder-actions {
