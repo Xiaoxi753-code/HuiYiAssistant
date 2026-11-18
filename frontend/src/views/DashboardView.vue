@@ -7575,6 +7575,13 @@ async function handleExportWord() {
     gap: 8px;
 }
 
+/* 标题独占一行，状态/类型标签统一排到第二行；
+   否则标题长短不同会让标签一会儿跟在标题后、一会儿换行，看起来忽左忽右 */
+.todo-alarm-card__head .todo-drawer-title {
+    flex: 1 1 100%;
+    min-width: 0;
+}
+
 .todo-mode-tag {
     display: inline-flex;
     align-items: center;
