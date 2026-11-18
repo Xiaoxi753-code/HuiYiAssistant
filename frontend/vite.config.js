@@ -43,6 +43,8 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,ico,svg,png,webp,woff2}'],
         navigateFallback: '/index.html',
         navigateFallbackDenylist: [/^\/api\//],
+        /** 主包已超过 workbox 默认 2 MiB 上限，不放开会导致构建失败且离线白屏 */
+        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
       },
     }),
   ],

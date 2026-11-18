@@ -1,4 +1,5 @@
 <script setup>
+import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElIcon } from 'element-plus'
 import 'element-plus/es/components/icon/style/css'
@@ -77,6 +78,12 @@ function goSkills() {
 function goGrowth() {
   router.push({ name: 'growth' })
 }
+
+function goAdmin() {
+  router.push({ name: 'admin' })
+}
+
+const isAdmin = computed(() => String(userStore.user?.role || '') === 'admin')
 
 function handleLogout() {
   userStore.clearUser()
@@ -179,6 +186,13 @@ function handleLogout() {
         <span class="nav-item-inner">
           <el-icon class="nav-item-icon" :size="18" aria-hidden="true"><Link /></el-icon>
           <span>外联推送配置</span>
+        </span>
+      </button>
+      <button v-if="isAdmin" type="button" class="nav-item" :class="{ active: route.name === 'admin' }" @click="goAdmin">
+        <span class="nav-item-inner">
+          <el-icon class="nav-item-icon" :size="18"><Setting /></el-icon>
+          <span>后台管理</span>
+          <span class="nav-badge hot">ADMIN</span>
         </span>
       </button>
     </nav>

@@ -1682,3 +1682,18 @@
         .rounded {
             border-radius: var(--radius);
         }
+/* ========== 全局隐藏滚动条（内容仍可正常滚动） ========== */
+html,
+body,
+* {
+    scrollbar-width: none !important; /* Firefox */
+    -ms-overflow-style: none !important; /* 旧版 Edge/IE */
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+*::-webkit-scrollbar {
+    width: 0 !important;
+    height: 0 !important;
+    display: none !important;
+}

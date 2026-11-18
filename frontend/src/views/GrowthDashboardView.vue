@@ -35,6 +35,8 @@ const userStore = useUserStore()
 const chartRef = ref(null)
 /** @type {import('echarts/core').EChartsType | null} */
 let chartInst = null
+/** 侧栏折叠/拖拽只改容器宽度、不触发 window.resize，需要观察容器尺寸 */
+let chartResizeObserver = null
 
 const emotionHistory = ref([])
 const reportsLoading = ref(false)
@@ -273,12 +275,22 @@ onMounted(async () => {
     })
     if (typeof window !== 'undefined') {
         window.addEventListener('resize', onWinResize)
+        if (typeof ResizeObserver !== 'undefined' && chartRef.value) {
+            chartResizeObserver = new ResizeObserver(() => {
+                resizeChart()
+            })
+            chartResizeObserver.observe(chartRef.value)
+        }
     }
 })
 
 onBeforeUnmount(() => {
     if (typeof window !== 'undefined') {
         window.removeEventListener('resize', onWinResize)
+    }
+    if (chartResizeObserver) {
+        chartResizeObserver.disconnect()
+        chartResizeObserver = null
     }
     disposeChart()
 })

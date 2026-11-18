@@ -28,3 +28,6 @@ Thumbs.db
 backend/data/
 uploads/
 temp/
+
+# WorkBuddy 本地记忆/工具状态
+.workbuddy/

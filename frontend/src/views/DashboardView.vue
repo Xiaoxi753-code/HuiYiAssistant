@@ -125,6 +125,18 @@ function renderMarkdown(text) {
     }
 }
 
+/** 已是 HTML 的消息（欢迎语、历史回放）同样要过净化，避免直接注入原始 HTML */
+function sanitizeHtml(html) {
+    if (html == null || html === '') {
+        return ''
+    }
+    try {
+        return DOMPurify.sanitize(String(html), PURIFY_MD_OPTS)
+    } catch {
+        return escapeHtmlForThink(String(html))
+    }
+}
+
 const router = useRouter()
 const route = useRoute()
 const userStore = useUserStore()
@@ -540,6 +552,18 @@ async function saveCompanionPersonaToProfile() {
 }
 
 const chatInput = ref('')
+
+/** 聊天流式请求状态：chatBusy 防并发发送，chatAbortController 供「停止生成」中断 */
+const chatBusy = ref(false)
+let chatAbortController = null
+
+function stopChatStream() {
+    if (!chatAbortController) {
+        return
+    }
+    chatAbortController.abort()
+    chatAbortController = null
+}
 
 /** 随对话请求上报，供后端注入「环境与时刻」（用户本地钟面） */
 function buildClientLocalTimeLabel() {
@@ -2016,12 +2040,19 @@ function toggleReminderCustomDay(day) {
 }
 
 function openReminderTimeEdit(row) {
-    if (!row?.id || !row.remindAt) {
+    if (!row?.id) {
+        ElMessage.error('待办数据异常，请刷新后重试')
         return
     }
     reminderTimeEditRow.value = row
-    const d = new Date(row.remindAt)
-    reminderTimeEditDate.value = Number.isFinite(d.getTime()) ? d : new Date()
+    const d = new Date(row.remindAt || '')
+    if (Number.isFinite(d.getTime())) {
+        reminderTimeEditDate.value = d
+    } else {
+        /** 没有提醒时间的待办：默认给 5 分钟后，避免点按钮毫无反应 */
+        reminderTimeEditDate.value = new Date(Date.now() + 5 * 60 * 1000)
+        ElMessage.info('这条待办还没有提醒时间，已默认填为 5 分钟后')
+    }
     reminderTimeEditOpen.value = true
 }
 
@@ -2068,7 +2099,10 @@ async function submitReminder() {
         return
     }
     const title = String(reminderForm.value.title || '').trim()
-    const remindAt = String(reminderForm.value.remindAt || '').trim()
+    /** datetime-local 给的是无时区的本地时间，统一转成带时区的 ISO，避免服务端按自身时区解释 */
+    const remindAtRaw = String(reminderForm.value.remindAt || '').trim()
+    const remindAtDate = new Date(remindAtRaw)
+    const remindAt = Number.isFinite(remindAtDate.getTime()) ? remindAtDate.toISOString() : ''
     const notes = String(reminderForm.value.notes || '').trim()
     const repeatMode = reminderForm.value.repeatMode || 'once'
     if (!title) {
@@ -2656,8 +2690,21 @@ onMounted(() => {
     })
 })
 
+/** 统一提示：此前只写 console，用户侧完全看不到反馈 */
 function showToast(type, msg) {
-  console.log('[toast]', type, msg)
+  const text = String(msg ?? '').trim()
+  if (!text) {
+    return
+  }
+  if (type === 'success') {
+    ElMessage.success(text)
+  } else if (type === 'error') {
+    ElMessage.error(text)
+  } else if (type === 'warning') {
+    ElMessage.warning(text)
+  } else {
+    ElMessage.info(text)
+  }
 }
 
 function handleLogout() {
@@ -3185,26 +3232,26 @@ function sendQuickChat(text) {
 }
 
 function onChatComposerKeydown(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault()
-        sendChatMessage()
+    if (e.key !== 'Enter' || e.shiftKey) {
+        return
     }
+    /** 中文输入法选词中的回车只用于确认候选词，不能当发送（isComposing / 229 为兼容旧 IME） */
+    if (e.isComposing || e.keyCode === 229) {
+        return
+    }
+    e.preventDefault()
+    sendChatMessage()
 }
 
-function tryAutoNavigate(reply) {
-    if (reply.includes('PPT')) {
-        goTab('ppt')
+function onCompanionComposerKeydown(e) {
+    if (e.key !== 'Enter' || e.shiftKey) {
         return
     }
-
-    if (reply.includes('会议')) {
-        goTab('meeting')
+    if (e.isComposing || e.keyCode === 229) {
         return
     }
-
-    if (reply.includes('模板')) {
-        goTab('templates')
-    }
+    e.preventDefault()
+    sendChatMessage(undefined, { chatMode: CHAT_MODE_COMPANION })
 }
 
 /** 从单个 SSE 帧（事件块以空行分隔）中拼接全部 data: 行内容 */
@@ -3464,6 +3511,8 @@ async function selectChatSession(sessionId) {
         return
     }
     chatHistoryOverlayOpen.value = false
+    /** 切换会话前先掐断正在生成的回复，否则上一轮的流会继续往新会话里追加内容 */
+    stopChatStream()
     try {
         const r = await fetch(`/api/chat/sessions/${sessionId}/messages?email=${encodeURIComponent(email)}`)
         const d = await r.json().catch(() => ({}))
@@ -3494,35 +3543,26 @@ async function selectChatSession(sessionId) {
     }
 }
 
+/**
+ * 新建对话：只在本地开一张空白草稿，不立刻落库。
+ * 会话记录由首次发送时的 ensureChatSessionBeforeSend 创建，
+ * 否则每点一次「新对话」就往历史里堆一条空记录。
+ */
 async function createNewChatSession() {
     const email = userStore.user?.email
     if (!email) {
         ElMessage.warning('请先登录后再使用多会话')
         return
     }
-    try {
-        const r = await fetch('/api/chat/sessions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, title: '新对话', ...resolveChatSessionMeta('default') }),
-        })
-        const d = await r.json().catch(() => ({}))
-        if (!r.ok || !d.success || !d.session?.id) {
-            throw new Error(d.message || `HTTP ${r.status}`)
-        }
-        currentChatSessionId.value = d.session.id
-        chatMessages.value = getInitialChatMessages()
-        chatInput.value = ''
-        chatLoadedPaperLabel.value = ''
-        activeChatSkill.value = null
-        await loadChatSessions()
-        await nextTick()
-        syncChatComposerHeight()
-        scheduleScrollChatToBottom(false)
-        ElMessage.success('已开始新对话')
-    } catch (e) {
-        ElMessage.error(String(e?.message || e || '创建失败'))
-    }
+    stopChatStream()
+    currentChatSessionId.value = null
+    chatMessages.value = getInitialChatMessages()
+    chatInput.value = ''
+    chatLoadedPaperLabel.value = ''
+    activeChatSkill.value = null
+    await nextTick()
+    syncChatComposerHeight()
+    scheduleScrollChatToBottom(false)
 }
 
 async function deleteChatSessionRow(row, ev) {
@@ -3604,6 +3644,10 @@ function syncChatComposerHeight() {
 }
 
 async function sendChatMessage(overrideText, options = {}) {
+    if (chatBusy.value) {
+        ElMessage.warning('上一条回复还在生成，请稍候，或点击「停止」后再发送')
+        return
+    }
     const chatMode = options.chatMode === CHAT_MODE_COMPANION ? CHAT_MODE_COMPANION : 'default'
     const isCompanion = chatMode === CHAT_MODE_COMPANION
     const messagesRef = isCompanion ? companionMessages : chatMessages
@@ -3634,7 +3678,17 @@ async function sendChatMessage(overrideText, options = {}) {
     }
 
     if (!isCompanion && userStore.user?.email) {
-        await ensureChatSessionBeforeSend()
+        /** 先占锁再 await，否则两次极快的回车都能穿过上面的忙闲判断 */
+        chatBusy.value = true
+        try {
+            await ensureChatSessionBeforeSend()
+        } catch (e) {
+            chatBusy.value = false
+            ElMessage.error(String(e?.message || e || '会话创建失败，请稍后重试'))
+            return
+        }
+    } else {
+        chatBusy.value = true
     }
 
     messagesRef.value.push({ role: 'user', content })
@@ -3658,6 +3712,8 @@ async function sendChatMessage(overrideText, options = {}) {
     await nextTick()
     scheduleScrollChatToBottom(isCompanion)
 
+    chatAbortController = new AbortController()
+
     try {
         const agentPayload = isCompanion
             ? {}
@@ -3674,6 +3730,7 @@ async function sendChatMessage(overrideText, options = {}) {
         const response = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            signal: chatAbortController?.signal,
             body: JSON.stringify({
                 message: content,
                 stream: true,
@@ -3791,9 +3848,6 @@ async function sendChatMessage(overrideText, options = {}) {
                 fetchModelConfigs()
             }
         }
-        if (!isCompanion) {
-            tryAutoNavigate(assistantMessage.content)
-        }
 
         if (!isCompanion && userStore.user?.email && currentChatSessionId.value) {
             const list = messagesRef.value
@@ -3852,6 +3906,9 @@ async function sendChatMessage(overrideText, options = {}) {
         await nextTick()
         scheduleScrollChatToBottom(isCompanion)
         ElMessage.warning(friendly)
+    } finally {
+        chatBusy.value = false
+        chatAbortController = null
     }
 }
 
@@ -4594,7 +4651,6 @@ function updateVariableValue(name, value) {
         entry.value = value
         entry.isTyping = false
         extractedVariables.value = [...extractedVariables.value]
-        console.log('[fill-stream] 已更新变量:', name, value)
         scheduleSyncToWord()
         return
     }
@@ -4603,7 +4659,6 @@ function updateVariableValue(name, value) {
         ...extractedVariables.value,
         { name, value, isTyping: false },
     ]
-    console.log('[fill-stream] 已新增变量:', name, value)
     scheduleSyncToWord()
 }
 
@@ -4688,7 +4743,6 @@ async function startAiFill() {
             }
 
             const chunk = decoder.decode(value, { stream: true })
-            console.log('收到原始流数据:', chunk)
             buffer += chunk
             const parts = buffer.split('\n\n')
             buffer = parts.pop() || ''
@@ -4699,9 +4753,6 @@ async function startAiFill() {
                 }
 
                 const { event, data } = parseSseChunk(part)
-                if (!part.includes('data:')) {
-                    console.log('未匹配 data 行:', part)
-                }
                 if (event === 'done') {
                     isFilling.value = false
                     continue
@@ -4928,17 +4979,8 @@ async function handleExportWord() {
             'dashboard--immersive': isImmersiveWorkbenchTab,
         }"
     >
-        <button
-            v-if="isImmersiveWorkbenchTab && userStore.user?.email"
-            type="button"
-            class="immersive-todo-bell-fixed topbar-todo-bell"
-            title="待办事项"
-            aria-label="待办事项"
-            @click="openTodoDrawer"
-        >
-            <span class="topbar-todo-bell-icon" aria-hidden="true">🔔</span>
-            <span v-if="todoPendingCount > 0" class="topbar-todo-badge">{{ todoPendingCount > 99 ? '99+' : todoPendingCount }}</span>
-        </button>
+        <!-- 沉浸 Tab 的待办入口由各自头部（对话工具栏 / 陪伴页头部）内的 TodoBell 提供，
+             此处不再额外放一个 fixed 按钮，否则会在内容顶部占出一截空白 -->
             <!-- Topbar（沉浸 Tab 隐藏，把高度还给聊天区） -->
             <div v-show="!isImmersiveWorkbenchTab" class="topbar">
                 <div>
@@ -5358,7 +5400,7 @@ async function handleExportWord() {
                                     :class="message.role === 'assistant' ? 'assistant' : 'user'"
                                 >
                                     <div class="msg-avatar">{{ message.role === 'assistant' ? '会' : (userStore.user?.name || 'U').charAt(0).toUpperCase() }}</div>
-                                    <div v-if="message.isHtml" class="msg-bubble" v-html="message.content"></div>
+                                    <div v-if="message.isHtml" class="msg-bubble" v-html="sanitizeHtml(message.content)"></div>
                                     <div v-else-if="message.role === 'assistant'" class="msg-bubble assistant-stream-bubble">
                                         <div v-if="message.statusBanner" class="chat-agent-status" role="status">{{ message.statusBanner }}</div>
                                         <div
@@ -5502,7 +5544,17 @@ async function handleExportWord() {
                                     >
                                         <span class="chat-mic-icon" aria-hidden="true"><el-icon :size="18"><Microphone /></el-icon></span>
                                     </button>
-                                    <button type="button" class="send-btn send-btn--inset" title="发送" aria-label="发送" @click="sendChatMessage()">&#9654;</button>
+                                    <button
+                                        v-if="chatBusy"
+                                        type="button"
+                                        class="send-btn send-btn--inset send-btn--stop"
+                                        title="停止生成"
+                                        aria-label="停止生成"
+                                        @click="stopChatStream"
+                                    >
+                                        &#9632;
+                                    </button>
+                                    <button v-else type="button" class="send-btn send-btn--inset" title="发送" aria-label="发送" @click="sendChatMessage()">&#9654;</button>
                                 </div>
                             </div>
                             </div>
@@ -6224,7 +6276,7 @@ async function handleExportWord() {
                     rows="1"
                     class="companion-textarea chat-input-textarea"
                     placeholder="随便聊聊，我都在～"
-                    @keydown.enter.prevent="sendChatMessage(undefined, { chatMode: CHAT_MODE_COMPANION })"
+                    @keydown="onCompanionComposerKeydown"
                 ></textarea>
                 <div class="chat-input-trailing">
                     <button
@@ -6237,7 +6289,16 @@ async function handleExportWord() {
                     >
                         <span class="chat-mic-icon" aria-hidden="true"><el-icon :size="18"><Microphone /></el-icon></span>
                     </button>
-                    <button type="button" class="send-btn companion-send" @click="sendChatMessage(undefined, { chatMode: CHAT_MODE_COMPANION })" title="发送">&#9654;</button>
+                    <button
+                        v-if="chatBusy"
+                        type="button"
+                        class="send-btn companion-send send-btn--stop"
+                        title="停止生成"
+                        @click="stopChatStream"
+                    >
+                        &#9632;
+                    </button>
+                    <button v-else type="button" class="send-btn companion-send" @click="sendChatMessage(undefined, { chatMode: CHAT_MODE_COMPANION })" title="发送">&#9654;</button>
                 </div>
             </div>
         </div>
@@ -6887,7 +6948,8 @@ async function handleExportWord() {
     gap: 0;
     margin-top: 0;
     align-items: stretch;
-    height: calc(100vh - 64px);
+    height: 100%;
+    min-height: 0;
     overflow: hidden;
 }
 
@@ -6944,14 +7006,16 @@ async function handleExportWord() {
 .word-variable-panel.immersive {
     position: relative;
     width: 320px;
-    min-height: 100vh;
+    min-height: 0;
+    height: 100%;
+    overflow-y: auto;
     border-radius: 0;
     border-left: 1px solid #e0e0e0;
     box-shadow: -2px 0 15px rgba(0, 0, 0, 0.03);
     padding: 24px 20px;
     background: #ffffff;
     position: sticky;
-    top: 64px;
+    top: 0;
 }
 
 .panel-actions {
@@ -7224,14 +7288,19 @@ async function handleExportWord() {
 }
 
 .templates-layout.has-file {
-    height: calc(100vh - 64px);
+    height: 100%;
+    min-height: 0;
 }
 
 #tabTemplates {
-    height: calc(100vh - 64px);
+    height: auto;
+    flex: 1 1 auto;
+    min-height: 0;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    /* 未加载模板时内容可能高于一屏，允许本页内部滚动；加载后由子容器自己吃掉高度 */
+    overflow-y: auto;
+    overflow-x: hidden;
     background-color: rgb(245, 243, 240);
 }
 
@@ -7256,7 +7325,9 @@ async function handleExportWord() {
 }
 
 #tabTemplates {
-    height: calc(100vh - 64px);
+    height: auto;
+    flex: 1 1 auto;
+    min-height: 0;
 }
 
 .panel-error {
@@ -7529,6 +7600,11 @@ async function handleExportWord() {
 .todo-mode-tag--custom {
     background: #e0e7ff;
     color: #4338ca;
+}
+
+/* 滚动条已全局隐藏，这里只保留稳定内边距，避免卡片右缘贴边 */
+.todo-drawer :deep(.el-drawer__body) {
+    padding-right: 18px;
 }
 
 .todo-drawer-status-tag {
@@ -8808,12 +8884,27 @@ async function handleExportWord() {
     min-height: 0;
 }
 
+/* 普通 Tab：让可见的 tab-content 吃掉顶栏之外的剩余高度，
+   避免出现「内容明明没占满一屏却还能滚动」 */
+.main-content.workspace-dashboard-body:not(.dashboard--immersive) {
+    display: flex;
+    flex-direction: column;
+}
+
+.main-content.workspace-dashboard-body:not(.dashboard--immersive) > .tab-content {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
 /* —— 全屏沉浸：仅对话助手 / 情感陪伴（根节点挂 dashboard--immersive） —— */
 .main-content.workspace-dashboard-body {
     flex: 1;
     min-width: 0;
     min-height: 0;
+    height: 100%;
     box-sizing: border-box;
+    overflow-y: auto;
+    overflow-x: hidden;
 }
 
 .main-content.workspace-dashboard-body.dashboard--immersive {
@@ -8939,25 +9030,8 @@ async function handleExportWord() {
     padding-top: 8px;
 }
 
-/* 沉浸对话 Tab：待办铃铛固定于主内容区右上角（随侧栏宽度偏移） */
-.immersive-todo-bell-fixed {
-    position: fixed;
-    top: 16px;
-    right: calc(var(--sidebar-width, 260px) + 20px);
-    z-index: 10050;
-    width: 44px;
-    height: 44px;
-    border-radius: 12px;
-    border: 1px solid #e2e8f0;
-    background: rgba(255, 255, 255, 0.96);
-    box-shadow: 0 2px 14px rgba(15, 23, 42, 0.1);
-    padding: 0;
-}
-
-.immersive-todo-bell-fixed:hover {
-    background: #f8fafc;
-    border-color: #cbd5e1;
-}
+/* 沉浸 Tab 的浮动待办铃铛已移除：它被 .topbar-todo-bell 的 position:relative 覆盖，
+   既没固定住又在流内占了 38px，导致对话/陪伴页顶部多出一截空白 */
 
 .topbar-actions--end {
     margin-left: auto;
@@ -9530,6 +9604,18 @@ async function handleExportWord() {
     color: #fff;
 }
 
+/* 生成中：发送按钮切换为「停止」，用中性色与发送态区分 */
+.send-btn--stop {
+    background: #e2e8f0;
+    color: #475569;
+    font-size: 12px;
+    line-height: 1;
+}
+
+.send-btn--stop:hover {
+    background: #cbd5e1;
+}
+
 .skill-at-popup--floating {
     position: absolute;
     left: 0;
@@ -9632,6 +9718,16 @@ async function handleExportWord() {
     align-items: flex-start;
     min-height: 0;
     padding: 12px 16px 20px;
+}
+
+/* el-empty 默认按内容收缩，导致提示语/拖拽区/链接框三条中线不一致 */
+.paper-tab-empty :deep(.el-empty) {
+    width: 100%;
+    padding: 24px 0 8px;
+}
+
+.paper-tab-empty :deep(.el-empty__description) {
+    margin-bottom: 8px;
 }
 
 .paper-empty-hint {
@@ -10398,7 +10494,7 @@ async function handleExportWord() {
 }
 
 .companion-persona-panel {
-    padding: 10px 14px;
+    padding: 10px 16px 10px 14px;
     border-bottom: 1px solid #fce7f3;
     background: linear-gradient(180deg, #fffdfb, #fffafc);
 }
@@ -10408,6 +10504,7 @@ async function handleExportWord() {
     flex-wrap: wrap;
     align-items: center;
     gap: 8px;
+    min-width: 0;
 }
 
 .companion-persona-label {
@@ -10543,9 +10640,56 @@ async function handleExportWord() {
     background: #fff;
 }
 
-.companion-textarea {
-    border-radius: 20px !important;
-    border-color: #fbcfe8 !important;
+/* 陪伴输入区：整条做成一个圆角盒子，麦克风/发送收进盒子右侧，
+   避免输入框自己圆角、按钮却挂在框外的割裂感 */
+.companion-input-toolbar {
+    align-items: center;
+    gap: 8px;
+    padding: 7px 8px 7px 16px;
+    background: #fff;
+    border: 1px solid #fbcfe8;
+    border-radius: 22px;
+    box-sizing: border-box;
+    min-height: 0;
+}
+
+.companion-input-toolbar .companion-textarea {
+    flex: 1;
+    min-width: 0;
+    border: none !important;
+    border-radius: 0 !important;
+    background: transparent;
+    padding: 6px 0;
+    min-height: 26px;
+    max-height: 160px;
+    resize: none;
+    box-shadow: none !important;
+}
+
+.companion-input-toolbar .chat-input-trailing {
+    flex: 0 0 auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    border: none;
+    background: transparent;
+    border-radius: 0;
+    overflow: visible;
+}
+
+.companion-input-toolbar .chat-mic-btn,
+.companion-input-toolbar .chat-input-trailing .send-btn {
+    flex: 0 0 auto;
+    width: 36px;
+    height: 36px;
+    min-height: 36px;
+    border: none !important;
+    border-top: none !important;
+    border-radius: 12px !important;
+}
+
+.companion-input-toolbar .chat-mic-btn {
+    background: #fdf2f8;
 }
 
 .companion-send {
@@ -10562,7 +10706,7 @@ async function handleExportWord() {
     padding: 0 24px 28px;
     box-sizing: border-box;
     background: rgb(245, 243, 240);
-    min-height: calc(100vh - 120px);
+    min-height: 0;
     overflow-x: hidden;
 }
 
@@ -10588,7 +10732,7 @@ async function handleExportWord() {
     gap: 20px;
     width: 100%;
     max-width: 100%;
-    min-height: calc(100vh - 168px);
+    min-height: 0;
     box-sizing: border-box;
     overflow-x: hidden;
 }

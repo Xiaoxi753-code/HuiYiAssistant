@@ -6,6 +6,7 @@ import WorkspaceLayout from '../layouts/WorkspaceLayout.vue'
 import DashboardView from '../views/DashboardView.vue'
 import SkillLibraryView from '../views/SkillLibraryView.vue'
 import GrowthDashboardView from '../views/GrowthDashboardView.vue'
+import AdminView from '../views/AdminView.vue'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -51,6 +52,12 @@ const router = createRouter({
       ],
     },
     {
+      path: '/admin',
+      name: 'admin',
+      component: AdminView,
+      meta: { requiresAuth: true, requiresAdmin: true },
+    },
+    {
       path: '/:pathMatch(.*)*',
       name: 'notFound',
       redirect: { name: 'login' },
@@ -63,6 +70,11 @@ router.beforeEach((to, _from, next) => {
   if (to.meta.requiresAuth && !store.user) {
     ElMessage.warning('请先登录或注册，以使用完整功能')
     next({ name: 'login' })
+    return
+  }
+  if (to.meta.requiresAdmin && String(store.user?.role || '') !== 'admin') {
+    ElMessage.warning('该页面仅管理员可访问')
+    next({ name: 'dashboard' })
     return
   }
   if (to.name === 'login' && store.user) {

@@ -17,6 +17,7 @@ services:
     container_name: openclaw-backend
     environment:
       NODE_ENV: production
+      TZ: Asia/Shanghai
       PORT: "3000"
       OPENCLAW_DATA_DIR: /app/data
       OPENCLAW_UPLOADS_DIR: /var/lib/openclaw/uploads

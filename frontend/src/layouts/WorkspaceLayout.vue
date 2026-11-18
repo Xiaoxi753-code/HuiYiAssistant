@@ -10,7 +10,7 @@
         v-show="!sidebarCollapsed"
         class="workspace-sidebar-resizer"
         aria-hidden="true"
-        @mousedown.prevent="startSidebarResize"
+        @pointerdown.prevent="startSidebarResize"
       />
       <router-view class="workspace-router-outlet" />
     </div>
@@ -65,7 +65,7 @@ let sidebarResizeActive = false
 let sidebarResizeStartX = 0
 let sidebarResizeStartW = 260
 
-function onSidebarResizeMouseMove(e) {
+function onSidebarResizePointerMove(e) {
   if (!sidebarResizeActive || sidebarCollapsed.value) {
     return
   }
@@ -74,13 +74,14 @@ function onSidebarResizeMouseMove(e) {
   sidebarWidthPx.value = nw
 }
 
-function onSidebarResizeMouseUp() {
+function onSidebarResizePointerUp() {
   if (!sidebarResizeActive) {
     return
   }
   sidebarResizeActive = false
-  document.removeEventListener('mousemove', onSidebarResizeMouseMove)
-  document.removeEventListener('mouseup', onSidebarResizeMouseUp)
+  document.removeEventListener('pointermove', onSidebarResizePointerMove)
+  document.removeEventListener('pointerup', onSidebarResizePointerUp)
+  document.removeEventListener('pointercancel', onSidebarResizePointerUp)
   document.body.style.cursor = ''
   document.body.style.userSelect = ''
   try {
@@ -97,15 +98,17 @@ function startSidebarResize(e) {
   sidebarResizeActive = true
   sidebarResizeStartX = e.clientX
   sidebarResizeStartW = sidebarWidthPx.value
-  document.addEventListener('mousemove', onSidebarResizeMouseMove)
-  document.addEventListener('mouseup', onSidebarResizeMouseUp)
+  document.addEventListener('pointermove', onSidebarResizePointerMove)
+  document.addEventListener('pointerup', onSidebarResizePointerUp)
+  document.addEventListener('pointercancel', onSidebarResizePointerUp)
   document.body.style.cursor = 'col-resize'
   document.body.style.userSelect = 'none'
 }
 
 onBeforeUnmount(() => {
-  document.removeEventListener('mousemove', onSidebarResizeMouseMove)
-  document.removeEventListener('mouseup', onSidebarResizeMouseUp)
+  document.removeEventListener('pointermove', onSidebarResizePointerMove)
+  document.removeEventListener('pointerup', onSidebarResizePointerUp)
+  document.removeEventListener('pointercancel', onSidebarResizePointerUp)
 })
 </script>
 
@@ -113,7 +116,11 @@ onBeforeUnmount(() => {
 #workspaceShell.dashboard-layout.active {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  /* 固定为一屏高：内部各 Tab 自己滚动，页面本身不再出现第二条滚动条 */
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .workspace-main-stage {
@@ -142,6 +149,7 @@ onBeforeUnmount(() => {
   z-index: 101;
   cursor: col-resize;
   background: transparent;
+  touch-action: none;
 }
 
 .workspace-sidebar-resizer:hover {
@@ -149,11 +157,11 @@ onBeforeUnmount(() => {
 }
 
 .dashboard-layout--hide-header {
-  min-height: 100vh;
+  min-height: 0;
 }
 
 .dashboard-layout--hide-header .workspace-main-stage {
-  min-height: 100vh;
+  min-height: 0;
   flex: 1 1 auto;
 }
 </style>

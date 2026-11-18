@@ -286,6 +286,121 @@ function ensureTemplatesOrganizationColumns() {
 }
 ensureTemplatesOrganizationColumns();
 
+/** 用户角色：后台管理需要服务端可校验的身份，不能只依赖前端传的 email */
+function ensureUsersRoleColumn() {
+  try {
+    const cols = db.prepare('PRAGMA table_info(users)').all();
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has('role')) {
+      db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'");
+      logger.info('[db migrate] users.role 已新增，默认 user');
+    }
+  } catch (e) {
+    logger.error('[db migrate] users.role', e);
+    throw e;
+  }
+}
+ensureUsersRoleColumn();
+
+/** 登录会话：令牌只存服务端，管理接口凭 Bearer 校验，避免用 URL 参数冒充身份 */
+function ensureAuthSessionsTable() {
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS auth_sessions (
+        token TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        expires_at TEXT NOT NULL
+      );
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions (user_id);');
+  } catch (e) {
+    logger.error('[db migrate] auth_sessions', e);
+    throw e;
+  }
+}
+ensureAuthSessionsTable();
+
+/** 首次启动若没有任何管理员，按 ADMIN_EMAIL → 内置 owner 账号 → 最早注册用户 的顺序补一个 */
+function seedFirstAdmin() {
+  try {
+    const { c } = db.prepare("SELECT COUNT(1) AS c FROM users WHERE role = 'admin'").get();
+    if (Number(c) > 0) {
+      return;
+    }
+    const preferred = String(process.env.ADMIN_EMAIL || 'xix777333@gmail.com').trim();
+    const target =
+      db.prepare('SELECT id, email FROM users WHERE email = ?').get(preferred) ||
+      db.prepare('SELECT id, email FROM users ORDER BY id ASC LIMIT 1').get();
+    if (!target) {
+      logger.warn('[admin] 暂无用户可设为管理员，注册后可用 ADMIN_EMAIL 指定');
+      return;
+    }
+    db.prepare("UPDATE users SET role = 'admin' WHERE id = ?").run(target.id);
+    logger.info(`[admin] 已将 ${target.email} 设为管理员（可用 users 表 role 字段调整）`);
+  } catch (e) {
+    logger.error('[admin] seed first admin', e);
+  }
+}
+seedFirstAdmin();
+
+const SESSION_TTL_DAYS = 30;
+
+function issueSessionToken(userId) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const expiresAt = new Date(Date.now() + SESSION_TTL_DAYS * 86400000).toISOString();
+  db.prepare('INSERT INTO auth_sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expiresAt);
+  return { token, expiresAt };
+}
+
+function readBearerToken(req) {
+  const header = String(req.headers?.authorization || '');
+  const matched = header.match(/^Bearer\s+(.+)$/i);
+  return matched ? matched[1].trim() : '';
+}
+
+function findUserByToken(token) {
+  if (!token) {
+    return null;
+  }
+  return (
+    db
+      .prepare(
+        `SELECT u.id, u.email, u.name, COALESCE(u.role, 'user') AS role
+           FROM auth_sessions s
+           JOIN users u ON u.id = s.user_id
+          WHERE s.token = ? AND s.expires_at > ?`,
+      )
+      .get(token, new Date().toISOString()) || null
+  );
+}
+
+/** 管理员接口统一入口：无有效令牌 401，非管理员 403 */
+function requireAdmin(req, res, next) {
+  const user = findUserByToken(readBearerToken(req));
+  if (!user) {
+    return res.status(401).json({ success: false, message: '登录状态已失效，请重新登录' });
+  }
+  if (user.role !== 'admin') {
+    return res.status(403).json({ success: false, message: '需要管理员权限' });
+  }
+  req.adminUser = user;
+  next();
+}
+
+/** 列表里展示密钥时只留头尾，避免后台页面泄露完整 Key */
+function maskSecret(raw) {
+  const s = String(raw || '');
+  if (!s) {
+    return '';
+  }
+  if (s.length <= 8) {
+    return '••••';
+  }
+  return `${s.slice(0, 4)}••••${s.slice(-4)}`;
+}
+
+
 
 /** 个人资料库：集中归档用户上传的文档、会议纪要与可复用资料 */
 function ensureKnowledgeItemsTable() {
@@ -480,6 +595,35 @@ function ensureAiRatingsTable() {
   }
 }
 ensureAiRatingsTable();
+
+/**
+ * 一次性归一化历史提醒时间：早期用 datetime-local 写入的是无时区串，
+ * 与 ISO-Z 混在同一列会让「按字符串比较时间」的查询全部失准。幂等，转换后不再命中。
+ */
+function normalizeLegacyTodoRemindAt() {
+  try {
+    const rows = db.prepare('SELECT id, remind_at AS remindAt FROM todos').all();
+    const upd = db.prepare('UPDATE todos SET remind_at = ? WHERE id = ?');
+    let changed = 0;
+    for (const row of rows) {
+      const raw = String(row.remindAt || '').trim();
+      if (!raw) {
+        continue;
+      }
+      const iso = normalizeRemindAtToIso(raw);
+      if (iso && iso !== raw) {
+        upd.run(iso, row.id);
+        changed += 1;
+      }
+    }
+    if (changed > 0) {
+      logger.info(`[db migrate] todos.remind_at 归一化为 ISO 共 ${changed} 条`);
+    }
+  } catch (e) {
+    logger.error('[db migrate] todos remind_at normalize', e);
+  }
+}
+normalizeLegacyTodoRemindAt();
 
 /** 强一致键名（INSERT OR REPLACE）；旧键仅用于读取兼容 */
 const WEBHOOK_KEY_WECOM = 'wecom_webhook';
@@ -1422,11 +1566,265 @@ app.post('/api/auth/login', (req, res) => {
   if (String(row.password || '') !== password) {
     return res.status(401).json({ success: false, message: '账号或密码错误' });
   }
+  const { token, expiresAt } = issueSessionToken(row.id);
   res.json({
     success: true,
     message: '登录成功',
-    user: { id: row.id, name: row.name, email: row.email },
+    user: { id: row.id, name: row.name, email: row.email, role: String(row.role || 'user') },
+    token,
+    expiresAt,
   });
+});
+
+/** 用现有令牌换取当前身份（前端刷新后校验角色用） */
+app.get('/api/auth/session', (req, res) => {
+  const user = findUserByToken(readBearerToken(req));
+  if (!user) {
+    return res.status(401).json({ success: false, message: '登录状态已失效' });
+  }
+  res.json({ success: true, user });
+});
+
+// ———————————————————————— 后台管理（仅 role=admin） ————————————————————————
+
+app.get('/api/admin/me', requireAdmin, (req, res) => {
+  res.json({ success: true, user: req.adminUser });
+});
+
+app.get('/api/admin/overview', requireAdmin, (req, res) => {
+  try {
+    const one = (sql, ...args) => Number(db.prepare(sql).get(...args)?.c || 0);
+    const counts = {
+      users: one('SELECT COUNT(1) AS c FROM users'),
+      admins: one("SELECT COUNT(1) AS c FROM users WHERE role = 'admin'"),
+      sessions: one('SELECT COUNT(1) AS c FROM chat_sessions'),
+      messages: one('SELECT COUNT(1) AS c FROM chat_messages'),
+      todos: one('SELECT COUNT(1) AS c FROM todos'),
+      templates: one('SELECT COUNT(1) AS c FROM templates'),
+      knowledge: one('SELECT COUNT(1) AS c FROM knowledge_items'),
+      skills: one('SELECT COUNT(1) AS c FROM skills'),
+    };
+    const activeUsers7d = one(
+      "SELECT COUNT(DISTINCT user_email) AS c FROM chat_sessions WHERE updated_at >= datetime('now', '-7 days')",
+    );
+    const messages7d = one("SELECT COUNT(1) AS c FROM chat_messages WHERE created_at >= datetime('now', '-7 days')");
+    const recentUsers = db
+      .prepare("SELECT id, email, name, COALESCE(role, 'user') AS role FROM users ORDER BY id DESC LIMIT 6")
+      .all();
+    const recentSessions = db
+      .prepare(
+        `SELECT s.id, s.user_email AS userEmail, s.title, s.updated_at AS updatedAt,
+                (SELECT COUNT(1) FROM chat_messages m WHERE m.session_id = s.id) AS messageCount
+           FROM chat_sessions s
+          ORDER BY s.updated_at DESC LIMIT 8`,
+      )
+      .all();
+    res.json({ success: true, counts, activeUsers7d, messages7d, recentUsers, recentSessions });
+  } catch (error) {
+    logger.error('[admin/overview]', error);
+    res.status(500).json({ success: false, message: '统计加载失败' });
+  }
+});
+
+app.get('/api/admin/users', requireAdmin, (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const like = `%${q}%`;
+    const where = q ? 'WHERE u.email LIKE ? OR u.name LIKE ?' : '';
+    const args = q ? [like, like] : [];
+    const items = db
+      .prepare(
+        `SELECT u.id, u.email, u.name, COALESCE(u.role, 'user') AS role,
+                (SELECT COUNT(1) FROM chat_sessions s WHERE s.user_email = u.email) AS sessionCount,
+                (SELECT COUNT(1) FROM todos t WHERE t.user_email = u.email) AS todoCount,
+                (SELECT COUNT(1) FROM templates tp WHERE tp.user_email = u.email) AS templateCount,
+                (SELECT COUNT(1) FROM knowledge_items k WHERE k.user_email = u.email) AS libraryCount,
+                (SELECT COUNT(1) FROM skills sk WHERE sk.user_email = u.email) AS skillCount,
+                (SELECT MAX(s2.updated_at) FROM chat_sessions s2 WHERE s2.user_email = u.email) AS lastActiveAt
+           FROM users u ${where}
+          ORDER BY u.id ASC`,
+      )
+      .all(...args);
+    res.json({ success: true, items });
+  } catch (error) {
+    logger.error('[admin/users]', error);
+    res.status(500).json({ success: false, message: '用户列表加载失败' });
+  }
+});
+
+app.patch('/api/admin/users/:id/role', requireAdmin, (req, res) => {
+  try {
+    const id = Number.parseInt(String(req.params.id || ''), 10);
+    const role = String(req.body?.role || '').trim();
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ success: false, message: '无效用户 ID' });
+    }
+    if (!['admin', 'user'].includes(role)) {
+      return res.status(400).json({ success: false, message: '角色只能是 admin 或 user' });
+    }
+    const target = db.prepare("SELECT id, email, COALESCE(role, 'user') AS role FROM users WHERE id = ?").get(id);
+    if (!target) {
+      return res.status(404).json({ success: false, message: '用户不存在' });
+    }
+    if (target.role === 'admin' && role === 'user') {
+      const { c } = db.prepare("SELECT COUNT(1) AS c FROM users WHERE role = 'admin'").get();
+      if (Number(c) <= 1) {
+        return res.status(400).json({ success: false, message: '至少需要保留一个管理员' });
+      }
+    }
+    db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, id);
+    logger.info('[admin] 角色变更', { operator: req.adminUser.email, target: target.email, role });
+    res.json({ success: true, role });
+  } catch (error) {
+    logger.error('[admin/users role]', error);
+    res.status(500).json({ success: false, message: '角色修改失败' });
+  }
+});
+
+app.post('/api/admin/users/:id/password', requireAdmin, (req, res) => {
+  try {
+    const id = Number.parseInt(String(req.params.id || ''), 10);
+    const newPassword = String(req.body?.newPassword || '');
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ success: false, message: '无效用户 ID' });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ success: false, message: '新密码至少 6 位' });
+    }
+    const target = db.prepare('SELECT id, email FROM users WHERE id = ?').get(id);
+    if (!target) {
+      return res.status(404).json({ success: false, message: '用户不存在' });
+    }
+    db.prepare('UPDATE users SET password = ? WHERE id = ?').run(newPassword, id);
+    /** 改密后踢掉该用户已有会话，避免旧令牌继续可用 */
+    db.prepare('DELETE FROM auth_sessions WHERE user_id = ?').run(id);
+    logger.info('[admin] 重置用户密码', { operator: req.adminUser.email, target: target.email });
+    res.json({ success: true, message: '已重置，请把新密码告知该用户' });
+  } catch (error) {
+    logger.error('[admin/users password]', error);
+    res.status(500).json({ success: false, message: '重置密码失败' });
+  }
+});
+
+app.delete('/api/admin/users/:id', requireAdmin, (req, res) => {
+  try {
+    const id = Number.parseInt(String(req.params.id || ''), 10);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ success: false, message: '无效用户 ID' });
+    }
+    if (id === Number(req.adminUser.id)) {
+      return res.status(400).json({ success: false, message: '不能删除当前登录的管理员' });
+    }
+    const target = db.prepare("SELECT id, email, COALESCE(role, 'user') AS role FROM users WHERE id = ?").get(id);
+    if (!target) {
+      return res.status(404).json({ success: false, message: '用户不存在' });
+    }
+    if (target.role === 'admin') {
+      const { c } = db.prepare("SELECT COUNT(1) AS c FROM users WHERE role = 'admin'").get();
+      if (Number(c) <= 1) {
+        return res.status(400).json({ success: false, message: '至少需要保留一个管理员' });
+      }
+    }
+    const email = target.email;
+    db.exec('BEGIN');
+    try {
+      db.prepare(
+        'DELETE FROM chat_messages WHERE session_id IN (SELECT id FROM chat_sessions WHERE user_email = ?)',
+      ).run(email);
+      db.prepare('DELETE FROM chat_sessions WHERE user_email = ?').run(email);
+      db.prepare('DELETE FROM todos WHERE user_email = ?').run(email);
+      db.prepare('DELETE FROM template_fill_records WHERE user_email = ?').run(email);
+      db.prepare('DELETE FROM templates WHERE user_email = ?').run(email);
+      db.prepare('DELETE FROM knowledge_items WHERE user_email = ?').run(email);
+      db.prepare('DELETE FROM skills WHERE user_email = ?').run(email);
+      db.prepare('DELETE FROM weekly_review_reports WHERE user_email = ?').run(email);
+      db.prepare('DELETE FROM user_stats WHERE user_email = ?').run(email);
+      db.prepare('DELETE FROM profile_turn_buffer WHERE user_email = ?').run(email);
+      db.prepare('DELETE FROM auth_sessions WHERE user_id = ?').run(id);
+      db.prepare('DELETE FROM users WHERE id = ?').run(id);
+      db.exec('COMMIT');
+    } catch (inner) {
+      db.exec('ROLLBACK');
+      throw inner;
+    }
+    logger.warn('[admin] 删除用户及其数据', { operator: req.adminUser.email, target: email });
+    res.json({ success: true, message: `已删除 ${email} 及其全部业务数据` });
+  } catch (error) {
+    logger.error('[admin/users delete]', error);
+    res.status(500).json({ success: false, message: '删除失败' });
+  }
+});
+
+app.get('/api/admin/system', requireAdmin, (req, res) => {
+  try {
+    const models = db
+      .prepare(
+        `SELECT id, name, base_url AS baseUrl, model_name AS modelName,
+                COALESCE(priority, 0) AS priority, COALESCE(is_enabled, 1) AS enabled,
+                api_key AS apiKey, COALESCE(type, 'chat') AS type
+           FROM model_configs ORDER BY priority DESC, id ASC`,
+      )
+      .all()
+      .map((row) => ({ ...row, apiKey: maskSecret(row.apiKey) }));
+
+    const webhookValue = (key) =>
+      String(db.prepare('SELECT config_value AS v FROM system_configs WHERE config_key = ?').get(key)?.v || '');
+
+    let dbSizeBytes = 0;
+    try {
+      dbSizeBytes = fs.statSync(dbPath).size;
+    } catch {
+      dbSizeBytes = 0;
+    }
+
+    res.json({
+      success: true,
+      models,
+      webhooks: {
+        wecom: Boolean(webhookValue('wecom_webhook') || webhookValue('webhook_wecom_url')),
+        feishu: Boolean(webhookValue('feishu_webhook') || webhookValue('webhook_feishu_url')),
+        pollMs: TODO_PUSH_POLL_MS,
+      },
+      runtime: {
+        nodeVersion: process.version,
+        platform: `${process.platform} ${process.arch}`,
+        uptimeSeconds: Math.round(process.uptime()),
+        dbPath,
+        dbSizeBytes,
+        dataDir: dataRoot,
+        logLevel: process.env.LOG_LEVEL || 'info',
+      },
+    });
+  } catch (error) {
+    logger.error('[admin/system]', error);
+    res.status(500).json({ success: false, message: '系统信息加载失败' });
+  }
+});
+
+/**
+ * 自助重置密码：本地演示环境没有邮件服务，用「账号 + 用户名」双要素校验后直接改密码。
+ * 注意：安全强度有限，仅适用于当前无邮件通道的单机/演示部署。
+ */
+app.post('/api/auth/reset-password', (req, res) => {
+  const account = String(req.body?.account || '').trim();
+  const name = String(req.body?.name || '').trim();
+  const newPassword = String(req.body?.newPassword || '');
+  if (!account || !name || !newPassword) {
+    return res.status(400).json({ success: false, message: '请填写账号、用户名与新密码' });
+  }
+  if (newPassword.length < 6) {
+    return res.status(400).json({ success: false, message: '新密码至少 6 位' });
+  }
+  const row = db.prepare('SELECT id, name FROM users WHERE email = ?').get(account);
+  if (!row) {
+    return res.status(404).json({ success: false, message: '该账号未注册' });
+  }
+  if (String(row.name || '').trim() !== name) {
+    return res.status(401).json({ success: false, message: '用户名与账号不匹配' });
+  }
+  db.prepare('UPDATE users SET password = ? WHERE id = ?').run(newPassword, row.id);
+  logger.info('[auth] 自助重置密码成功', { userId: row.id });
+  res.json({ success: true, message: '密码已重置，请用新密码登录' });
 });
 
 app.get('/api/user/profile', (req, res) => {
@@ -2937,18 +3335,23 @@ app.post('/api/todos', (req, res) => {
     if (!remind || Number.isNaN(Date.parse(remind))) {
       return res.status(400).json({ success: false, message: 'remindAt 无效' });
     }
+    /** 入库前统一成带时区 ISO */
+    const remindIso = normalizeRemindAtToIso(remind);
+    if (!remindIso) {
+      return res.status(400).json({ success: false, message: 'remindAt 无效' });
+    }
     const info = db
       .prepare(
         `INSERT INTO todos (user_email, title, remind_at, notes, source, done, repeat_mode, repeat_custom_days, status)
          VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'pending')`,
       )
-      .run(email, t, remind, memo, src, repeatMode, repeatCustomDaysJson);
+      .run(email, t, remindIso, memo, src, repeatMode, repeatCustomDaysJson);
     res.json({
       success: true,
       item: {
         id: Number(info.lastInsertRowid),
         title: t,
-        remindAt: remind,
+        remindAt: remindIso,
         notes: memo,
         source: src,
         done: 0,
@@ -3089,6 +3492,10 @@ app.patch('/api/todos/:id/remind-at', (req, res) => {
     if (!remindAt || Number.isNaN(Date.parse(remindAt))) {
       return res.status(400).json({ success: false, message: 'remindAt 无效' });
     }
+    const remindAtIso = normalizeRemindAtToIso(remindAt);
+    if (!remindAtIso) {
+      return res.status(400).json({ success: false, message: 'remindAt 无效' });
+    }
     const info = db
       .prepare(
         `UPDATE todos SET remind_at = ?, status = 'pending',
@@ -3097,11 +3504,11 @@ app.patch('/api/todos/:id/remind-at', (req, res) => {
               push_retry_count = 0
          WHERE id = ? AND user_email = ? AND done = 0`,
       )
-      .run(remindAt, id, email);
+      .run(remindAtIso, id, email);
     if (info.changes === 0) {
       return res.status(404).json({ success: false, message: '未找到待办或无权操作' });
     }
-    res.json({ success: true, remindAt });
+    res.json({ success: true, remindAt: remindAtIso });
   } catch (error) {
     logger.error('[todos/remind-at]', error);
     res.status(500).json({ success: false, message: '更新时间失败' });
@@ -3551,23 +3958,34 @@ function parseRemindAtToUtcMs(remindAtStr) {
   if (!raw) {
     return NaN;
   }
-  let ms = Date.parse(raw);
+  /** 无时区字面量（历史 datetime-local 写入，如 2026-05-12T21:19）按东八区解释 */
+  const naiveRe = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?$/;
+  /**
+   * 关键：不能直接把无时区串丢给 Date.parse —— 那会按「服务器本地时区」解释，
+   * 本地开发（GMT+8）正常，跑在 UTC 容器里就会整体偏 8 小时。
+   */
+  let ms = Date.parse(naiveRe.test(raw) ? `${raw.replace(' ', 'T')}+08:00` : raw);
   if (Number.isFinite(ms)) {
     return ms;
   }
   const m = raw.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::(\d{2}))?/);
   if (m) {
     const secTail = m[3] != null ? `:${m[3]}` : ':00';
-    ms = Date.parse(`${m[1]}T${m[2]}${secTail}.000Z`);
-    if (Number.isFinite(ms)) {
-      return ms;
-    }
-    ms = Date.parse(`${m[1]}T${m[2]}${secTail}`);
+    ms = Date.parse(`${m[1]}T${m[2]}${secTail}+08:00`);
     if (Number.isFinite(ms)) {
       return ms;
     }
   }
   return NaN;
+}
+
+/** 写入数据库前统一成带时区 ISO，避免同一列里混存三种格式 */
+function normalizeRemindAtToIso(remindAtStr) {
+  const ms = parseRemindAtToUtcMs(remindAtStr);
+  if (!Number.isFinite(ms)) {
+    return '';
+  }
+  return new Date(ms).toISOString();
 }
 
 function isRemindDueNow(remindAtStr, nowMs = Date.now()) {
@@ -3782,9 +4200,14 @@ app.get('/api/chat/sessions', (req, res) => {
     }
     const rows = db
       .prepare(
-        `SELECT id, title, persona_id AS personaId, persona_label AS personaLabel, persona_emoji AS personaEmoji,
-                skill_id AS skillId, skill_name AS skillName, created_at AS createdAt, updated_at AS updatedAt
-         FROM chat_sessions WHERE user_email = ? ORDER BY datetime(updated_at) DESC LIMIT 200`,
+        `SELECT cs.id, cs.title, cs.persona_id AS personaId, cs.persona_label AS personaLabel,
+                cs.persona_emoji AS personaEmoji, cs.skill_id AS skillId, cs.skill_name AS skillName,
+                cs.created_at AS createdAt, cs.updated_at AS updatedAt,
+                (SELECT COUNT(1) FROM chat_messages m WHERE m.session_id = cs.id) AS messageCount
+           FROM chat_sessions cs
+          WHERE cs.user_email = ?
+            AND EXISTS (SELECT 1 FROM chat_messages m2 WHERE m2.session_id = cs.id)
+          ORDER BY datetime(cs.updated_at) DESC LIMIT 200`,
       )
       .all(email);
     res.json({ success: true, items: rows });
